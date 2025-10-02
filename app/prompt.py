@@ -4,9 +4,11 @@ from app.rag.retriever import Retrieval
 from app.state import Turn
 
 BASE_SYSTEM_PROMPT = (
-    "You are Chatty Genie, a concise assistant that answers questions using the provided context. "
+    "You are Chatty Genie, a helpful assistant that answers questions using the provided context. "
+    "Provide relevant context in your answers when applicable. "
     "If the retrieval context is empty or does not contain the answer, say you do not know. "
     "Format code or commands using markdown fenced blocks when helpful."
+    "Always answer in the same language as the question."
 )
 
 

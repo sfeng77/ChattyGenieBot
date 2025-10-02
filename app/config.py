@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = Field("http://localhost:11434", env="OLLAMA_BASE_URL")
     llm_model: str = Field("llama3.1", env="LLM_MODEL")
     embed_model: str = Field("nomic-embed-text", env="EMBED_MODEL")
+    log_level: str = Field("INFO", env="LOG_LEVEL")
 
     docs_dir: Path = Field(Path("data") / "docs", env="DOCS_DIR")
     index_dir: Path = Field(Path("data") / "index", env="INDEX_DIR")

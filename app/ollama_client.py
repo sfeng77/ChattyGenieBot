@@ -1,8 +1,12 @@
 import asyncio
 import json
+import logging
 from typing import AsyncGenerator, Iterable, List, Optional
 
 import httpx
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class OllamaClient:
@@ -26,6 +30,7 @@ class OllamaClient:
     async def _get_async_client(self) -> httpx.AsyncClient:
         async with self._client_lock:
             if self._async_client is None:
+                LOGGER.debug("Creating async httpx client for Ollama at %s", self._base_url)
                 self._async_client = httpx.AsyncClient(
                     base_url=self._base_url,
                     timeout=self._timeout,
@@ -34,6 +39,7 @@ class OllamaClient:
 
     def _get_sync_client(self) -> httpx.Client:
         if self._sync_client is None:
+            LOGGER.debug("Creating sync httpx client for Ollama at %s", self._base_url)
             self._sync_client = httpx.Client(
                 base_url=self._base_url,
                 timeout=self._timeout,
@@ -53,6 +59,7 @@ class OllamaClient:
             embedding = embedding[0]
         if not isinstance(embedding, list):
             raise ValueError("embedding payload is not a list")
+        LOGGER.debug("Received embedding of dim=%s", len(embedding))
         return embedding
 
     async def generate_stream(
@@ -74,6 +81,13 @@ class OllamaClient:
         if context:
             payload["context"] = context
 
+        LOGGER.debug(
+            "Starting generation (prompt_chars=%s, has_system=%s, has_context=%s)",
+            len(prompt),
+            bool(system_prompt),
+            bool(context),
+        )
+
         client = await self._get_async_client()
         async with client.stream("POST", "/api/generate", json=payload) as response:
             response.raise_for_status()
@@ -83,11 +97,14 @@ class OllamaClient:
                 try:
                     data = json.loads(line)
                 except json.JSONDecodeError:
+                    LOGGER.debug("Skipping non-JSON stream line: %s", line[:120])
                     continue
                 if data.get("done"):
+                    LOGGER.debug("Generation stream completed")
                     break
                 chunk = data.get("response")
                 if chunk:
+                    LOGGER.debug("Yielding chunk chars=%s", len(chunk))
                     yield chunk
 
     async def embed(self, texts: Iterable[str]) -> List[List[float]]:
@@ -98,10 +115,12 @@ class OllamaClient:
                 "model": self._embed_model,
                 "prompt": text,
             }
+            LOGGER.debug("Requesting async embedding (chars=%s)", len(text))
             response = await client.post("/api/embeddings", json=payload)
             response.raise_for_status()
             vector = self._extract_embedding(response.json())
             results.append(vector)
+        LOGGER.debug("Produced %s embeddings", len(results))
         return results
 
     def embed_sync(self, texts: Iterable[str]) -> List[List[float]]:
@@ -112,18 +131,22 @@ class OllamaClient:
                 "model": self._embed_model,
                 "prompt": text,
             }
+            LOGGER.debug("Requesting sync embedding (chars=%s)", len(text))
             response = client.post("/api/embeddings", json=payload)
             response.raise_for_status()
             vector = self._extract_embedding(response.json())
             results.append(vector)
+        LOGGER.debug("Produced %s embeddings (sync)", len(results))
         return results
 
     async def aclose(self) -> None:
         async with self._client_lock:
             if self._async_client is not None:
+                LOGGER.debug("Closing async Ollama client")
                 await self._async_client.aclose()
                 self._async_client = None
         if self._sync_client is not None:
+            LOGGER.debug("Closing sync Ollama client")
             self._sync_client.close()
             self._sync_client = None
 

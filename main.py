@@ -5,28 +5,19 @@ from app.bot import build_application, shutdown as bot_shutdown
 from app.config import get_settings
 
 
-async def run_bot() -> None:
-    settings = get_settings()
-    application = build_application(settings)
-
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-
-    try:
-        await application.updater.idle()
-    finally:
-        await application.stop()
-        await application.shutdown()
-        await bot_shutdown(application)
-
-
 def main() -> None:
+    settings = get_settings()
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
-    asyncio.run(run_bot())
+    logging.getLogger("httpx").setLevel(level)
+    application = build_application(settings)
+    try:
+        application.run_polling()
+    finally:
+        asyncio.run(bot_shutdown(application))
 
 
 if __name__ == "__main__":
