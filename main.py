@@ -12,7 +12,6 @@ def main() -> None:
         level=level,
         format="%(asctime)s %(levelname)s %(name)s | %(message)s",
     )
-    logging.getLogger("httpx").setLevel(level)
     application = build_application(settings)
     try:
         application.run_polling()
@@ -22,3 +21,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

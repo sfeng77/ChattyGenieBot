@@ -1,17 +1,11 @@
 # Chatty Genie Bot
 
-Telegram assistant backed by a local Ollama model with retrieval-augmented generation over documents on disk.
+Telegram assistant built on the OpenAI Agents SDK. The bot simply transports messages between Telegram and an agent that holds per-chat memory via SQLite sessions.
 
 ## Prerequisites
 - Python 3.11+
-- [Ollama](https://ollama.com/) running locally
+- An OpenAI API key with access to the configured model (or Ollama running with the OpenAI-compatible server)
 - Telegram bot token from @BotFather
-
-Pull the models you plan to use:
-```powershell
-ollama pull llama3.1
-ollama pull nomic-embed-text
-```
 
 ## Setup
 ```powershell
@@ -20,29 +14,32 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Create a `.env` file (or export env vars):
+## Configuration
+Create a `.env` file (or export environment variables):
 ```text
 TELEGRAM_BOT_TOKEN=123456:ABCDEF
-OLLAMA_BASE_URL=http://localhost:11434
-LLM_MODEL=llama3.1
-EMBED_MODEL=nomic-embed-text
+OPENAI_API_KEY=ollama
+OPENAI_API_BASE=http://localhost:11434/v1
+OPENAI_MODEL=gpt-oss:20b
+OPENAI_TEMPERATURE=0.2
+OPENAI_TRACING_ENABLED=false
+LOG_LEVEL=DEBUG
+MAX_INPUT_CHARS=4000
 ```
-
-Place reference documents under `data/docs`. Supported formats: `.txt`, `.md`, `.markdown`, `.rst`.
-
-Build the retrieval index:
-```powershell
-python -m app.rag.indexer
-```
+`OPENAI_API_BASE` defaults to the local Ollama OpenAI-compatible endpoint. Set `OPENAI_TRACING_ENABLED=true` only if you want to send traces to OpenAI.
+`SESSIONS_DB_PATH` may be set if you need a custom storage location. By default, session state lives at `data/sessions/sessions.db`.
 
 ## Run the bot
 ```powershell
 python main.py
 ```
 
-The bot runs in long-polling mode. Use `/reset` to clear chat memory and `/reindex` to rebuild the index (owner only).
+Commands:
+- `/start` - welcome message
+- `/help` - command reference
+- `/reset` - clear the conversation memory for the current chat
 
 ## Notes
-- Responses stream into Telegram via message edits.
-- The RAG context is derived from cosine similarity over Ollama embeddings.
-- Guardrails: per-message length cap, retrieval failure handling, configurable reindex permissions.
+- Conversation memory is managed by OpenAI Agents sessions; we keep one SQLite session per chat ID.
+- The Telegram bot layer handles typing indicators and basic validation, but all reasoning happens inside the agent.
+- Refer to the OpenAI Agents Python quickstart (https://openai.github.io/openai-agents-python/quickstart/) for extending the agent with tools or different models.
