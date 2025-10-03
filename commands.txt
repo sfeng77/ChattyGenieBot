@@ -1,0 +1,3 @@
+start - Start interacting with Chatty Genie
+help - Show available commands
+reset - Clear conversation memory
