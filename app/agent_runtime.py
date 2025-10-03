@@ -2,14 +2,24 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Dict
+from typing import Dict, List
 
-from agents import Agent, Runner, SQLiteSession, set_default_openai_api, set_default_openai_client, set_default_openai_key, set_tracing_disabled
+from agents import (
+    Agent,
+    Runner,
+    SQLiteSession,
+    set_default_openai_api,
+    set_default_openai_client,
+    set_default_openai_key,
+    set_tracing_disabled,
+)
 from agents import ModelSettings
 from openai import AsyncOpenAI
 
 from app.config import Settings
-from app.prompt import AGENT_INSTRUCTIONS
+from app.prompt import get_agent_instructions
+from app.tools import create_disabled_web_search_tool, create_ollama_web_search_tool
+from app.web_search_client import WebSearchClient
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,13 +37,46 @@ class AgentRuntime:
                 base_url=settings.openai_api_base,
             )
             set_default_openai_client(client)
+        tools: List[object] = []
+        self._web_search_tool = None
+        web_search_available = False
+        if settings.web_search_enabled:
+            try:
+                self._web_search_tool = self._build_web_search_tool()
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to initialize web_search tool")
+            else:
+                tools.append(self._web_search_tool)
+                web_search_available = True
+        if self._web_search_tool is None:
+            notice = (
+                "web_search is currently unavailable."
+                if settings.web_search_enabled
+                else "web_search is disabled for this deployment."
+            )
+            self._web_search_tool = create_disabled_web_search_tool(message=notice)
+            tools.append(self._web_search_tool)
+        instructions = get_agent_instructions(web_search_available)
         self._agent = Agent(
             name="Chatty Genie",
-            instructions=AGENT_INSTRUCTIONS,
+            instructions=instructions,
             model=settings.openai_model,
             model_settings=ModelSettings(temperature=settings.openai_temperature),
+            tools=tools,
         )
         self._sessions: Dict[int, SQLiteSession] = {}
+
+    def _build_web_search_tool(self):
+        client = WebSearchClient(
+            base_url=self._settings.web_search_base_url,
+            endpoint=self._settings.web_search_endpoint,
+            timeout=self._settings.web_search_timeout,
+            api_key=self._settings.web_search_api_key,
+        )
+        return create_ollama_web_search_tool(
+            client=client,
+            default_max_results=self._settings.web_search_default_max_results,
+        )
 
     def _session_id(self, chat_id: int) -> str:
         return f"chat-{chat_id}"
