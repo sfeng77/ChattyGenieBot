@@ -194,20 +194,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if event_type == "llm_started":
             preview = meta.get("prompt_preview")
             system_prompt = meta.get("system_prompt")
-            details: List[str] = []
             if preview:
-                details.append(f"prompt: {_truncate(str(preview), 160)}")
+                LOGGER.debug("Prompt preview: %s", _truncate(str(preview), 160))
             if system_prompt:
-                details.append(f"system: {_truncate(str(system_prompt), 160)}")
-            body = "; ".join(details) if details else "model call"
-            timeline.append(_timeline_line(meta, "[model]", body))
+                LOGGER.debug("System prompt snapshot: %s", _truncate(str(system_prompt), 160))
+            timeline.append(_timeline_line(meta, "[model]", "model call started"))
             _trim_timeline()
             await apply_edit()
             return
         if event_type == "llm_finished":
             preview = meta.get("response_preview") or text
             if preview:
-                timeline.append(_timeline_line(meta, "[model]", f"response: {_truncate(str(preview), 160)}"))
+                timeline.append(_timeline_line(meta, "[model]", f"response: {_truncate(str(preview), 32)}"))
                 _trim_timeline()
                 await apply_edit()
             return
@@ -219,17 +217,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if event_type == "tool_finished":
             name = text or meta.get("tool") or "tool"
-            summary = meta.get("summary")
-            count = meta.get("results_count")
-            query = meta.get("query")
-            details: List[str] = []
-            if query:
-                details.append(f"query=\"{_truncate(str(query), 120)}\"")
-            if count is not None:
-                details.append(f"{count} results")
-            if summary:
-                details.append(_truncate(str(summary), settings.progress_tool_result_max_chars))
-            body = "; ".join(details) if details else "finished"
+            if name == "web_search":
+                url = meta.get("top_url") or "(no url)"
+                summary_val = meta.get("summary") or ""
+                first_line = str(summary_val).splitlines()[0] if str(summary_val).splitlines() else ""
+                preview_line = _truncate(first_line, settings.progress_tool_result_max_chars)
+                body = f"url: {url} | {preview_line}".strip(' |')
+            else:
+                summary = meta.get("summary")
+                count = meta.get("results_count")
+                query = meta.get("query")
+                details: List[str] = []
+                if query:
+                    details.append(f"query=\"{_truncate(str(query), 120)}\"")
+                if count is not None:
+                    details.append(f"{count} results")
+                if summary:
+                    details.append(_truncate(str(summary), settings.progress_tool_result_max_chars))
+                body = "; ".join(details) if details else "finished"
             timeline.append(_timeline_line(meta, "[tool]", f"{name} {body}"))
             _trim_timeline()
             await apply_edit()
@@ -254,7 +259,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if event_type == "turn_finished":
             final_text = (event.get("text") or "").strip()
             if final_text:
-                timeline.append(_timeline_line(meta, "[done]", _truncate(final_text, 160)))
+                timeline.append(_timeline_line(meta, "[done]", "model responded with final answer"))
                 _trim_timeline()
                 await apply_edit()
             return

@@ -222,6 +222,12 @@ class ProgressHooks(RunHooks[TContext]):
             results = payload.get("results")
             if isinstance(results, list):
                 meta["results_count"] = len(results)
+                if results:
+                    first = results[0]
+                    if isinstance(first, dict):
+                        top_url = first.get("url") or first.get("link")
+                        if isinstance(top_url, str) and top_url.strip():
+                            meta["top_url"] = top_url.strip()
                 snippet = _first_snippet(results)
                 if snippet:
                     summary_text = self._truncate(snippet)
