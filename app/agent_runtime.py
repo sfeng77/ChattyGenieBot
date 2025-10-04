@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from agents import (
     Agent,
@@ -112,6 +112,11 @@ class AgentRuntime:
         enable_progress: bool,
     ) -> str:
         session = self._get_session(chat_id)
+        if self._settings.history_prune_enabled:
+            try:
+                await self._maybe_prune_session(session)
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("History pruning failed", exc_info=True)
         hooks = None
         active_dispatcher: ProgressDispatcher | None = None
         if dispatcher is not None and enable_progress:
@@ -145,6 +150,89 @@ class AgentRuntime:
         if output is None:
             return ""
         return str(output).strip()
+
+    async def _maybe_prune_session(self, session: SQLiteSession) -> None:
+        keep_last = max(1, int(self._settings.history_keep_last_items))
+        threshold = max(keep_last + 1, int(self._settings.history_prune_threshold_items))
+        items = await session.get_items()
+        if len(items) <= threshold:
+            return
+        older = items[:-keep_last]
+        tail = items[-keep_last:]
+        transcript = self._items_to_transcript(older, max_chars=self._settings.history_summary_max_chars * 4)
+        summary = await self._summarize_transcript(transcript, max_chars=self._settings.history_summary_max_chars)
+        if not summary:
+            summary = self._fallback_summary(transcript, self._settings.history_summary_max_chars)
+        summary_item: Dict[str, Any] = {"role": "system", "content": f"Earlier conversation summary (auto-generated):\n{summary}"}
+        try:
+            await session.clear_session()
+            await session.add_items([summary_item] + tail)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Failed to rewrite session history", exc_info=True)
+
+    def _items_to_transcript(self, items: list[Dict[str, Any]], max_chars: int) -> str:
+        segments: list[str] = []
+        for item in items:
+            role = str(item.get("role") or "user")
+            content = item.get("content")
+            text = ""
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                collected: list[str] = []
+                for piece in content:
+                    if not isinstance(piece, dict):
+                        continue
+                    for key in ("text", "input_text", "output_text", "content"):
+                        val = piece.get(key)
+                        if isinstance(val, str) and val.strip():
+                            collected.append(val)
+                            break
+                text = " ".join(collected)
+            elif content is not None:
+                text = str(content)
+            text = text.strip()
+            if not text:
+                continue
+            segments.append(f"[{role}] {text}")
+        transcript = "\n".join(segments)
+        if len(transcript) > max_chars:
+            return transcript[-max_chars:]
+        return transcript
+
+    async def _summarize_transcript(self, transcript: str, max_chars: int) -> str:
+        if not transcript:
+            return ""
+        summarizer = Agent(
+            name="Summarizer",
+            instructions=("You are a concise summarizer. Summarize the prior conversation into a factual, neutral summary. Focus on key questions, decisions, facts, and follow-ups. Avoid speculation. Keep the summary under the requested character limit."),
+            model=self._settings.openai_model,
+            model_settings=ModelSettings(temperature=0.1),
+            tools=[],
+        )
+        prompt = (
+            f"Character limit: {max_chars}.\n"
+            "Return only the summary text (no preface).\n\n"
+            "Conversation:\n"
+            f"{transcript}"
+        )
+        try:
+            result = await Runner.run(summarizer, prompt, session=None, max_turns=1)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Summarizer call failed", exc_info=True)
+            return ""
+        output = result.final_output
+        summary = output if isinstance(output, str) else ("" if output is None else str(output))
+        summary = summary.strip()
+        if len(summary) > max_chars:
+            summary = summary[: max(0, max_chars - 3)].rstrip() + "..."
+        return summary
+
+    def _fallback_summary(self, transcript: str, max_chars: int) -> str:
+        if not transcript:
+            return ""
+        trimmed = transcript[-max_chars:] if len(transcript) > max_chars else transcript
+        return trimmed.strip()
 
     async def reset(self, chat_id: int) -> None:
         session = self._sessions.pop(chat_id, None)
@@ -181,3 +269,4 @@ class AgentRuntime:
 
 
 __all__ = ["AgentRuntime"]
+
