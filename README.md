@@ -32,14 +32,13 @@ WEB_SEARCH_TIMEOUT=15
 OLLAMA_API_KEY=your-ollama-api-key
 LOG_LEVEL=DEBUG
 MAX_INPUT_CHARS=4000
-PROGRESS_UPDATES_ENABLED=false
 PROGRESS_EDIT_THROTTLE_MS=800
 PROGRESS_KEEP_TIMELINE=false
 PROGRESS_TOOL_RESULT_MAX_CHARS=160
 ```
 `OPENAI_API_BASE` defaults to the local Ollama OpenAI-compatible endpoint. Set `WEB_SEARCH_ENABLED=true` to expose the `web_search` tool; the Ollama API key is required and is sent as `Authorization: Bearer <OLLAMA_API_KEY>`.
 `SESSIONS_DB_PATH` may be set if you need a custom storage location. By default, session state lives at `data/sessions/sessions.db`.
-`PROGRESS_UPDATES_ENABLED` toggles live progress edits. Use the related `PROGRESS_EDIT_THROTTLE_MS`, `PROGRESS_KEEP_TIMELINE`, and `PROGRESS_TOOL_RESULT_MAX_CHARS` settings to tune how often Telegram messages are updated and how much tool output is surfaced.
+Use `PROGRESS_EDIT_THROTTLE_MS`, `PROGRESS_KEEP_TIMELINE`, and `PROGRESS_TOOL_RESULT_MAX_CHARS` to tune how often Telegram messages are updated and how much tool output is surfaced.
 
 ## Run the bot
 ```powershell
@@ -53,6 +52,6 @@ Commands:
 
 ## Notes
 - Conversation memory is managed by OpenAI Agents sessions; we keep one SQLite session per chat ID.
-- Enable progress updates to stream tool/model status to Telegram while a turn is running; disable them if you prefer a single final message.
+- Use /progress to toggle live tool/model status updates while a turn is running.
 - When the web search tool is enabled, the agent will call it for time-sensitive questions and respond with short citations.
 - Refer to the OpenAI Agents Python quickstart (https://openai.github.io/openai-agents-python/quickstart/) for extending the agent with tools or different models.

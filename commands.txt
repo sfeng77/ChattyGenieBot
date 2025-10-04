@@ -1,3 +1,4 @@
-start - Start interacting with Chatty Genie
+start - Start interacting with Agent Mushroom
 help - Show available commands
 reset - Clear conversation memory
+progress - Toggle live progress updates

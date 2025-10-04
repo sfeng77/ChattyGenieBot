@@ -34,7 +34,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message is None:
         return
     LOGGER.debug("/start invoked by chat_id=%s", message.chat_id)
-    await message.reply_text("Hi! I am Chatty Genie. Send me a message and I will reply using OpenAI Agents.")
+    await message.reply_text("Hi! I am Agent Mushroom. Send me a message and I will reply using OpenAI Agents.")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -42,7 +42,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if message is None:
         return
     LOGGER.debug("/help invoked by chat_id=%s", message.chat_id)
-    await message.reply_text("Commands:\n/start - welcome message\n/reset - clear conversation memory")
+    await message.reply_text("Commands:\n/start - welcome message\n/reset - clear conversation memory\n/progress - toggle live progress updates for this chat")
 
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -53,6 +53,17 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
     await runtime.reset(message.chat_id)
     await message.reply_text("Conversation memory cleared.")
+
+
+async def toggle_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    current = bool(context.chat_data.get("progress_enabled", False))
+    new_state = not current
+    context.chat_data["progress_enabled"] = new_state
+    status = "enabled" if new_state else "disabled"
+    await message.reply_text(f"Progress updates {status} for this chat.")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -73,11 +84,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    progress_enabled = bool(context.chat_data.get("progress_enabled", False))
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     placeholder = await message.reply_text("Thinking...")
 
-    if not settings.progress_updates_enabled:
+    if not progress_enabled:
         try:
             response = await runtime.run_message(chat_id, user_text)
         except Exception as exc:  # noqa: BLE001
@@ -144,7 +156,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if event_type == "llm_finished":
             preview = meta.get("response_preview") or text
             if preview:
-                timeline.append(_timeline_line(meta, "[model]", f"response: {_truncate(preview, 160)}"))
+                timeline.append(_timeline_line(meta, "[model]", f"response: {_truncate(str(preview), 160)}"))
                 await apply_edit()
             return
         if event_type == "tool_started":
@@ -199,7 +211,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         try:
-            response = await runtime.run_message_with_progress(chat_id, user_text, dispatcher)
+            response = await runtime.run_message_with_progress(chat_id, user_text, dispatcher, enable_progress=True)
         except Exception as exc:  # noqa: BLE001
             if error_text is None:
                 error_text = str(exc)
@@ -235,6 +247,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("reset", reset))
+    application.add_handler(CommandHandler("progress", toggle_progress))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
 
     return application
@@ -251,4 +264,3 @@ __all__ = [
     "build_application",
     "shutdown",
 ]
-

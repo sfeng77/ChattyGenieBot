@@ -30,7 +30,6 @@ class AgentRuntime:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._session_db_path = settings.sessions_db_path
-        self._progress_updates_enabled = settings.progress_updates_enabled
         self._progress_result_char_limit = settings.progress_tool_result_max_chars
         set_default_openai_api("chat_completions")
         set_default_openai_key(settings.openai_api_key)
@@ -93,27 +92,29 @@ class AgentRuntime:
         return session
 
     async def run_message(self, chat_id: int, user_message: str) -> str:
-        return await self._run(chat_id, user_message, dispatcher=None)
+        return await self._run(chat_id, user_message, dispatcher=None, enable_progress=False)
 
     async def run_message_with_progress(
         self,
         chat_id: int,
         user_message: str,
         dispatcher: ProgressDispatcher | None,
+        enable_progress: bool,
     ) -> str:
         dispatcher = dispatcher or NullProgressDispatcher()
-        return await self._run(chat_id, user_message, dispatcher=dispatcher)
+        return await self._run(chat_id, user_message, dispatcher=dispatcher, enable_progress=enable_progress)
 
     async def _run(
         self,
         chat_id: int,
         user_message: str,
         dispatcher: ProgressDispatcher | None,
+        enable_progress: bool,
     ) -> str:
         session = self._get_session(chat_id)
         hooks = None
         active_dispatcher: ProgressDispatcher | None = None
-        if dispatcher is not None and self._progress_updates_enabled:
+        if dispatcher is not None and enable_progress:
             active_dispatcher = dispatcher
             hooks = ProgressHooks(
                 dispatcher=dispatcher,
