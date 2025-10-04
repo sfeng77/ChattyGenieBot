@@ -13,6 +13,10 @@ from app.progress import ProgressDispatcher, ProgressEvent
 
 LOGGER = logging.getLogger(__name__)
 
+MAX_PROGRESS_LINES = 40
+MAX_PROGRESS_CHARS = 3000
+
+
 SETTINGS_KEY = "settings"
 AGENT_RUNTIME_KEY = "agent_runtime"
 WHITELIST_KEY = "whitelist_user_ids"
@@ -156,6 +160,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     timeline: List[str] = [_timeline_line({"elapsed_seconds": 0.0}, "[user]", _truncate(user_text, 200))]
 
+    def _trim_timeline() -> None:
+        # Keep only the most recent progress entries to avoid hitting Telegram limits
+        while len(timeline) > MAX_PROGRESS_LINES:
+            if len(timeline) <= 1:
+                break
+            timeline.pop(1)
+        while len('\n'.join(timeline)) > MAX_PROGRESS_CHARS and len(timeline) > 1:
+            timeline.pop(1)
+
     async def apply_edit(force: bool = False) -> None:
         nonlocal last_edit
         now = time.monotonic()
@@ -175,6 +188,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         if event_type == "turn_started":
             timeline.append(_timeline_line(meta, "[agent]", "turn started"))
+            _trim_timeline()
             await apply_edit(force=True)
             return
         if event_type == "llm_started":
@@ -187,17 +201,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 details.append(f"system: {_truncate(str(system_prompt), 160)}")
             body = "; ".join(details) if details else "model call"
             timeline.append(_timeline_line(meta, "[model]", body))
+            _trim_timeline()
             await apply_edit()
             return
         if event_type == "llm_finished":
             preview = meta.get("response_preview") or text
             if preview:
                 timeline.append(_timeline_line(meta, "[model]", f"response: {_truncate(str(preview), 160)}"))
+                _trim_timeline()
                 await apply_edit()
             return
         if event_type == "tool_started":
             name = text or meta.get("tool") or "tool"
             timeline.append(_timeline_line(meta, "[tool]", f"{name} started"))
+            _trim_timeline()
             await apply_edit()
             return
         if event_type == "tool_finished":
@@ -214,12 +231,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 details.append(_truncate(str(summary), settings.progress_tool_result_max_chars))
             body = "; ".join(details) if details else "finished"
             timeline.append(_timeline_line(meta, "[tool]", f"{name} {body}"))
+            _trim_timeline()
             await apply_edit()
             return
         if event_type == "tool_error":
             name = text or meta.get("tool") or "tool"
             error_msg = meta.get("error") or text or "tool error"
             timeline.append(_timeline_line(meta, "[tool-error]", f"{name}: {_truncate(str(error_msg), 160)}"))
+            _trim_timeline()
             await apply_edit(force=True)
             return
         if event_type == "turn_failed":
@@ -229,17 +248,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 reason = f"{exc_type}: {reason}"
             error_text = reason
             timeline.append(_timeline_line(meta, "[error]", reason))
+            _trim_timeline()
             await apply_edit(force=True)
             return
         if event_type == "turn_finished":
             final_text = (event.get("text") or "").strip()
             if final_text:
                 timeline.append(_timeline_line(meta, "[done]", _truncate(final_text, 160)))
+                _trim_timeline()
                 await apply_edit()
             return
 
         if text:
             timeline.append(_timeline_line(meta, "[event]", _truncate(text, 160)))
+            _trim_timeline()
             await apply_edit()
 
     remove_listener = dispatcher.add_listener(on_progress)
@@ -259,17 +281,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await placeholder.edit_text(f"Agent error: {error_text or 'Agent run failed.'}")
         return
 
-    final_message = final_text or response or "I am sorry, I could not formulate a response."
-    final_message = final_message.strip() or "I am sorry, I could not formulate a response."
-    if keep_timeline and timeline:
-        timeline_block = "\n".join(timeline)
-        final_message = f"{final_message}\n\n---\n{timeline_block}"
+    final_plain = final_text or response or "I am sorry, I could not formulate a response."
+    final_plain = final_plain.strip() or "I am sorry, I could not formulate a response."
 
     try:
-        await placeholder.edit_text(final_message)
+        await message.reply_text(final_plain)
     except Exception:  # noqa: BLE001
-        LOGGER.debug("Failed to edit message", exc_info=True)
-        await message.reply_text(final_message)
+        LOGGER.debug("Failed to send final message", exc_info=True)
+        try:
+            await placeholder.edit_text(final_plain)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Fallback edit failed", exc_info=True)
+            await message.reply_text(final_plain)
+    if not keep_timeline:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=placeholder.message_id)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Failed to delete progress message", exc_info=True)
 
 
 
@@ -318,5 +346,6 @@ __all__ = [
     "build_application",
     "shutdown",
 ]
+
 
 
