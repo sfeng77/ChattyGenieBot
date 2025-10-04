@@ -1,4 +1,6 @@
 import logging
+import time
+from typing import Any, List
 
 from telegram import Update
 from telegram.constants import ChatAction
@@ -6,11 +8,25 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from app.agent_runtime import AgentRuntime
 from app.config import Settings
+from app.progress import ProgressDispatcher, ProgressEvent
 
 LOGGER = logging.getLogger(__name__)
 
 SETTINGS_KEY = "settings"
 AGENT_RUNTIME_KEY = "agent_runtime"
+
+
+def _truncate(text: str, limit: int = 160) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3]}..."
+
+
+def _format_timeline(timeline: List[str]) -> str:
+    if not timeline:
+        return "Thinking..."
+    return "Thinking...\n" + "\n".join(timeline)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -61,19 +77,151 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     placeholder = await message.reply_text("Thinking...")
 
-    try:
-        response = await runtime.run_message(chat_id, user_text)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Agent run failed")
-        await placeholder.edit_text(f"Agent error: {exc}")
+    if not settings.progress_updates_enabled:
+        try:
+            response = await runtime.run_message(chat_id, user_text)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Agent run failed")
+            await placeholder.edit_text(f"Agent error: {exc}")
+            return
+        final_text = response.strip() or "I am sorry, I could not formulate a response."
+        try:
+            await placeholder.edit_text(final_text)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Failed to edit message", exc_info=True)
+            await message.reply_text(final_text)
         return
 
-    final_text = response.strip() or "I am sorry, I could not formulate a response."
+    dispatcher = ProgressDispatcher()
+    throttle_seconds = max(settings.progress_edit_throttle_ms / 1000.0, 0.1)
+    keep_timeline = settings.progress_keep_timeline
+    last_edit = 0.0
+    final_text: str | None = None
+    error_text: str | None = None
+
+    def _timeline_line(meta: dict[str, Any] | None, label: str, body: str) -> str:
+        elapsed: str | None = None
+        if meta and isinstance(meta.get("elapsed_seconds"), (int, float)):
+            elapsed = f"{meta['elapsed_seconds']:.2f}s"
+        parts = [p for p in [elapsed, label, body] if p]
+        return " | ".join(parts)
+
+    timeline: List[str] = [_timeline_line({"elapsed_seconds": 0.0}, "[user]", _truncate(user_text, 200))]
+
+    async def apply_edit(force: bool = False) -> None:
+        nonlocal last_edit
+        now = time.monotonic()
+        if not force and (now - last_edit) < throttle_seconds:
+            return
+        try:
+            await placeholder.edit_text(_format_timeline(timeline))
+            last_edit = now
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Progress edit failed", exc_info=True)
+
+    async def on_progress(event: ProgressEvent) -> None:
+        nonlocal final_text, error_text
+        event_type = event.get("type")
+        meta = (event.get("meta") or {}).copy()
+        text = event.get("text") or ""
+
+        if event_type == "turn_started":
+            timeline.append(_timeline_line(meta, "[agent]", "turn started"))
+            await apply_edit(force=True)
+            return
+        if event_type == "llm_started":
+            preview = meta.get("prompt_preview")
+            system_prompt = meta.get("system_prompt")
+            details: List[str] = []
+            if preview:
+                details.append(f"prompt: {_truncate(str(preview), 160)}")
+            if system_prompt:
+                details.append(f"system: {_truncate(str(system_prompt), 160)}")
+            body = "; ".join(details) if details else "model call"
+            timeline.append(_timeline_line(meta, "[model]", body))
+            await apply_edit()
+            return
+        if event_type == "llm_finished":
+            preview = meta.get("response_preview") or text
+            if preview:
+                timeline.append(_timeline_line(meta, "[model]", f"response: {_truncate(preview, 160)}"))
+                await apply_edit()
+            return
+        if event_type == "tool_started":
+            name = text or meta.get("tool") or "tool"
+            timeline.append(_timeline_line(meta, "[tool]", f"{name} started"))
+            await apply_edit()
+            return
+        if event_type == "tool_finished":
+            name = text or meta.get("tool") or "tool"
+            summary = meta.get("summary")
+            count = meta.get("results_count")
+            query = meta.get("query")
+            details: List[str] = []
+            if query:
+                details.append(f"query=\"{_truncate(str(query), 120)}\"")
+            if count is not None:
+                details.append(f"{count} results")
+            if summary:
+                details.append(_truncate(str(summary), settings.progress_tool_result_max_chars))
+            body = "; ".join(details) if details else "finished"
+            timeline.append(_timeline_line(meta, "[tool]", f"{name} {body}"))
+            await apply_edit()
+            return
+        if event_type == "tool_error":
+            name = text or meta.get("tool") or "tool"
+            error_msg = meta.get("error") or text or "tool error"
+            timeline.append(_timeline_line(meta, "[tool-error]", f"{name}: {_truncate(str(error_msg), 160)}"))
+            await apply_edit(force=True)
+            return
+        if event_type == "turn_failed":
+            reason = (event.get("text") or "Agent run failed.").strip()
+            exc_type = meta.get("exception_type")
+            if exc_type:
+                reason = f"{exc_type}: {reason}"
+            error_text = reason
+            timeline.append(_timeline_line(meta, "[error]", reason))
+            await apply_edit(force=True)
+            return
+        if event_type == "turn_finished":
+            final_text = (event.get("text") or "").strip()
+            if final_text:
+                timeline.append(_timeline_line(meta, "[done]", _truncate(final_text, 160)))
+                await apply_edit()
+            return
+
+        if text:
+            timeline.append(_timeline_line(meta, "[event]", _truncate(text, 160)))
+            await apply_edit()
+
+    remove_listener = dispatcher.add_listener(on_progress)
+    await apply_edit(force=True)
+
     try:
-        await placeholder.edit_text(final_text)
+        try:
+            response = await runtime.run_message_with_progress(chat_id, user_text, dispatcher)
+        except Exception as exc:  # noqa: BLE001
+            if error_text is None:
+                error_text = str(exc)
+            raise
+        finally:
+            remove_listener()
+    except Exception:
+        LOGGER.exception("Agent run failed")
+        await placeholder.edit_text(f"Agent error: {error_text or 'Agent run failed.'}")
+        return
+
+    final_message = final_text or response or "I am sorry, I could not formulate a response."
+    final_message = final_message.strip() or "I am sorry, I could not formulate a response."
+    if keep_timeline and timeline:
+        timeline_block = "\n".join(timeline)
+        final_message = f"{final_message}\n\n---\n{timeline_block}"
+
+    try:
+        await placeholder.edit_text(final_message)
     except Exception:  # noqa: BLE001
         LOGGER.debug("Failed to edit message", exc_info=True)
-        await message.reply_text(final_text)
+        await message.reply_text(final_message)
 
 
 def build_application(settings: Settings) -> Application:

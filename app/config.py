@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     web_search_api_key: str | None = Field(None, alias="OLLAMA_API_KEY")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     max_input_chars: int = Field(4000, alias="MAX_INPUT_CHARS")
+    progress_updates_enabled: bool = Field(False, alias="PROGRESS_UPDATES_ENABLED")
+    progress_edit_throttle_ms: int = Field(800, alias="PROGRESS_EDIT_THROTTLE_MS")
+    progress_keep_timeline: bool = Field(False, alias="PROGRESS_KEEP_TIMELINE")
+    progress_tool_result_max_chars: int = Field(160, alias="PROGRESS_TOOL_RESULT_MAX_CHARS")
     sessions_db_path: Path = Field(Path("data") / "sessions" / "sessions.db", alias="SESSIONS_DB_PATH")
 
     model_config = {

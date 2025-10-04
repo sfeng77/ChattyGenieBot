@@ -17,6 +17,8 @@ from agents import ModelSettings
 from openai import AsyncOpenAI
 
 from app.config import Settings
+from app.progress import NullProgressDispatcher, ProgressDispatcher
+from app.progress_hooks import ProgressHooks
 from app.prompt import get_agent_instructions
 from app.tools import create_disabled_web_search_tool, create_ollama_web_search_tool
 from app.web_search_client import WebSearchClient
@@ -28,6 +30,8 @@ class AgentRuntime:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._session_db_path = settings.sessions_db_path
+        self._progress_updates_enabled = settings.progress_updates_enabled
+        self._progress_result_char_limit = settings.progress_tool_result_max_chars
         set_default_openai_api("chat_completions")
         set_default_openai_key(settings.openai_api_key)
         set_tracing_disabled(not settings.openai_tracing_enabled)
@@ -89,8 +93,51 @@ class AgentRuntime:
         return session
 
     async def run_message(self, chat_id: int, user_message: str) -> str:
+        return await self._run(chat_id, user_message, dispatcher=None)
+
+    async def run_message_with_progress(
+        self,
+        chat_id: int,
+        user_message: str,
+        dispatcher: ProgressDispatcher | None,
+    ) -> str:
+        dispatcher = dispatcher or NullProgressDispatcher()
+        return await self._run(chat_id, user_message, dispatcher=dispatcher)
+
+    async def _run(
+        self,
+        chat_id: int,
+        user_message: str,
+        dispatcher: ProgressDispatcher | None,
+    ) -> str:
         session = self._get_session(chat_id)
-        result = await Runner.run(self._agent, user_message, session=session)
+        hooks = None
+        active_dispatcher: ProgressDispatcher | None = None
+        if dispatcher is not None and self._progress_updates_enabled:
+            active_dispatcher = dispatcher
+            hooks = ProgressHooks(
+                dispatcher=dispatcher,
+                chat_id=chat_id,
+                user_message=user_message,
+                result_char_limit=self._progress_result_char_limit,
+            )
+        try:
+            result = await Runner.run(
+                self._agent,
+                user_message,
+                session=session,
+                hooks=hooks,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if active_dispatcher is not None:
+                await active_dispatcher.emit(
+                    {
+                        "type": "turn_failed",
+                        "text": str(exc),
+                        "meta": {"chat_id": chat_id, "exception_type": exc.__class__.__name__},
+                    }
+                )
+            raise
         output = result.final_output
         if isinstance(output, str):
             return output.strip()
