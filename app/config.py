@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     progress_edit_throttle_ms: int = Field(800, alias="PROGRESS_EDIT_THROTTLE_MS")
     progress_keep_timeline: bool = Field(False, alias="PROGRESS_KEEP_TIMELINE")
     progress_tool_result_max_chars: int = Field(160, alias="PROGRESS_TOOL_RESULT_MAX_CHARS")
+    whitelisted_user_ids: str | None = Field(None, alias="WHITELISTED_USER_IDS")
     sessions_db_path: Path = Field(Path("data") / "sessions" / "sessions.db", alias="SESSIONS_DB_PATH")
 
     model_config = {

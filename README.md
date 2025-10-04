@@ -35,10 +35,12 @@ MAX_INPUT_CHARS=4000
 PROGRESS_EDIT_THROTTLE_MS=800
 PROGRESS_KEEP_TIMELINE=false
 PROGRESS_TOOL_RESULT_MAX_CHARS=160
+WHITELISTED_USER_IDS=123456789,987654321
 ```
+
 `OPENAI_API_BASE` defaults to the local Ollama OpenAI-compatible endpoint. Set `WEB_SEARCH_ENABLED=true` to expose the `web_search` tool; the Ollama API key is required and is sent as `Authorization: Bearer <OLLAMA_API_KEY>`.
 `SESSIONS_DB_PATH` may be set if you need a custom storage location. By default, session state lives at `data/sessions/sessions.db`.
-Use `PROGRESS_EDIT_THROTTLE_MS`, `PROGRESS_KEEP_TIMELINE`, and `PROGRESS_TOOL_RESULT_MAX_CHARS` to tune how often Telegram messages are updated and how much tool output is surfaced.
+Use `PROGRESS_EDIT_THROTTLE_MS`, `PROGRESS_KEEP_TIMELINE`, and `PROGRESS_TOOL_RESULT_MAX_CHARS` to tune how often Telegram messages are updated and how much tool output is surfaced. Define `WHITELISTED_USER_IDS` as a comma-separated list of Telegram user IDs to restrict access (leave empty to allow everyone).
 
 ## Run the bot
 ```powershell
@@ -49,6 +51,7 @@ Commands:
 - `/start` - welcome message
 - `/help` - command reference
 - `/reset` - clear the conversation memory for the current chat
+- `/progress` - toggle live progress updates
 
 ## Notes
 - Conversation memory is managed by OpenAI Agents sessions; we keep one SQLite session per chat ID.

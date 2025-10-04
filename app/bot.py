@@ -1,6 +1,7 @@
 import logging
 import time
-from typing import Any, List
+from functools import wraps
+from typing import Any, Awaitable, Callable, List, Set
 
 from telegram import Update
 from telegram.constants import ChatAction
@@ -14,6 +15,9 @@ LOGGER = logging.getLogger(__name__)
 
 SETTINGS_KEY = "settings"
 AGENT_RUNTIME_KEY = "agent_runtime"
+WHITELIST_KEY = "whitelist_user_ids"
+
+HandlerFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
 
 def _truncate(text: str, limit: int = 160) -> str:
@@ -29,6 +33,34 @@ def _format_timeline(timeline: List[str]) -> str:
     return "Thinking...\n" + "\n".join(timeline)
 
 
+def _is_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    whitelist: Set[int] = context.application.bot_data.get(WHITELIST_KEY, set())
+    if not whitelist:
+        return True
+    user = update.effective_user
+    if user is None:
+        return False
+    return user.id in whitelist
+
+
+async def _deny_access(update: Update) -> None:
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text("Sorry, you are not authorized to use this bot.")
+
+
+def require_authorized(fn: HandlerFunc) -> HandlerFunc:
+    @wraps(fn)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not _is_authorized(update, context):
+            await _deny_access(update)
+            return
+        await fn(update, context)
+
+    return wrapper
+
+
+@require_authorized
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
@@ -37,6 +69,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text("Hi! I am Agent Mushroom. Send me a message and I will reply using OpenAI Agents.")
 
 
+@require_authorized
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
@@ -45,6 +78,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await message.reply_text("Commands:\n/start - welcome message\n/reset - clear conversation memory\n/progress - toggle live progress updates for this chat")
 
 
+@require_authorized
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
@@ -55,6 +89,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text("Conversation memory cleared.")
 
 
+@require_authorized
 async def toggle_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
@@ -66,6 +101,7 @@ async def toggle_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await message.reply_text(f"Progress updates {status} for this chat.")
 
 
+@require_authorized
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None or not message.text:
@@ -236,6 +272,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await message.reply_text(final_message)
 
 
+
+def _parse_whitelist(raw: str | None) -> Set[int]:
+    if not raw:
+        return set()
+    items = set()
+    for piece in raw.split(','):
+        candidate = piece.strip()
+        if not candidate:
+            continue
+        try:
+            items.add(int(candidate))
+        except ValueError:
+            LOGGER.warning("Ignoring invalid telegram user id in whitelist: %s", candidate)
+    return items
+
+
+
 def build_application(settings: Settings) -> Application:
     LOGGER.debug("Building application with model=%s", settings.openai_model)
     runtime = AgentRuntime(settings)
@@ -243,6 +296,7 @@ def build_application(settings: Settings) -> Application:
     application = Application.builder().token(settings.telegram_bot_token).build()
     application.bot_data[SETTINGS_KEY] = settings
     application.bot_data[AGENT_RUNTIME_KEY] = runtime
+    application.bot_data[WHITELIST_KEY] = _parse_whitelist(settings.whitelisted_user_ids)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
@@ -264,3 +318,5 @@ __all__ = [
     "build_application",
     "shutdown",
 ]
+
+
