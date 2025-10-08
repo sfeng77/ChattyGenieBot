@@ -19,8 +19,14 @@ from openai import AsyncOpenAI
 from app.config import Settings
 from app.progress import NullProgressDispatcher, ProgressDispatcher
 from app.progress_hooks import ProgressHooks
+from app.finance_client import AlphaVantageClient
 from app.prompt import get_agent_instructions
-from app.tools import create_disabled_web_search_tool, create_ollama_web_search_tool
+from app.tools import (
+    create_disabled_finance_tool,
+    create_disabled_web_search_tool,
+    create_ollama_web_search_tool,
+    create_stock_trend_tool,
+)
 from app.web_search_client import WebSearchClient
 
 LOGGER = logging.getLogger(__name__)
@@ -42,7 +48,9 @@ class AgentRuntime:
             set_default_openai_client(client)
         tools: List[object] = []
         self._web_search_tool = None
+        self._finance_tool = None
         web_search_available = False
+        finance_available = False
         if settings.web_search_enabled:
             try:
                 self._web_search_tool = self._build_web_search_tool()
@@ -59,7 +67,23 @@ class AgentRuntime:
             )
             self._web_search_tool = create_disabled_web_search_tool(message=notice)
             tools.append(self._web_search_tool)
-        instructions = get_agent_instructions(web_search_available)
+        if settings.finance_enabled:
+            try:
+                self._finance_tool = self._build_finance_tool()
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to initialize stock_trend tool")
+            else:
+                tools.append(self._finance_tool)
+                finance_available = True
+        if self._finance_tool is None:
+            notice = (
+                "stock_trend is currently unavailable."
+                if settings.finance_enabled
+                else "stock_trend is disabled for this deployment."
+            )
+            self._finance_tool = create_disabled_finance_tool(message=notice)
+            tools.append(self._finance_tool)
+        instructions = get_agent_instructions(web_search_available, finance_available)
         self._agent = Agent(
             name="Chatty Genie",
             instructions=instructions,
@@ -79,6 +103,26 @@ class AgentRuntime:
         return create_ollama_web_search_tool(
             client=client,
             default_max_results=self._settings.web_search_default_max_results,
+        )
+
+    def _build_finance_tool(self):
+        provider = (self._settings.finance_provider or "").lower()
+        if provider == "alpha_vantage":
+            api_key = self._settings.finance_api_key
+            if not api_key:
+                raise ValueError("FINANCE_API_KEY must be set to use Alpha Vantage")
+            client = AlphaVantageClient(
+                api_key=api_key,
+                timeout=self._settings.finance_timeout,
+            )
+            provider_label = "alpha_vantage"
+        else:
+            raise ValueError(f"Unsupported finance provider: {self._settings.finance_provider}")
+        return create_stock_trend_tool(
+            client=client,
+            provider_name=provider_label,
+            default_window_days=self._settings.finance_default_window_days,
+            cache_ttl_minutes=self._settings.finance_cache_ttl_minutes,
         )
 
     def _session_id(self, chat_id: int) -> str:

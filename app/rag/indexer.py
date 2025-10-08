@@ -10,6 +10,7 @@ from typing import Iterable, List, Sequence, Tuple
 import numpy as np
 
 from app.config import Settings, get_settings
+from app.logging_utils import setup_logging
 from app.ollama_client import OllamaClient
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".markdown", ".rst"}
@@ -150,9 +151,7 @@ def main() -> None:
     if args.index is not None:
         settings.index_dir = args.index
 
-    level = getattr(logging, settings.log_level.upper(), logging.INFO)
-    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
-    logging.getLogger("httpx").setLevel(level)
+    setup_logging(settings)
 
     client = OllamaClient(
         base_url=settings.ollama_base_url,

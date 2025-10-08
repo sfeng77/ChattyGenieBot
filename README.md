@@ -40,10 +40,17 @@ HISTORY_PRUNE_ENABLED=true
 HISTORY_PRUNE_THRESHOLD_ITEMS=60
 HISTORY_KEEP_LAST_ITEMS=12
 HISTORY_SUMMARY_MAX_CHARS=800
+FINANCE_ENABLED=false
+FINANCE_PROVIDER=alpha_vantage
+FINANCE_API_KEY=
+FINANCE_TIMEOUT=10
+FINANCE_WINDOW_DAYS=7
+FINANCE_CACHE_TTL_MINUTES=10
 ```
 
 `OPENAI_API_BASE` defaults to the local Ollama OpenAI-compatible endpoint. Set `WEB_SEARCH_ENABLED=true` to expose the `web_search` tool; the Ollama API key is required and is sent as `Authorization: Bearer <OLLAMA_API_KEY>`.
 `SESSIONS_DB_PATH` may be set if you need a custom storage location. By default, session state lives at `data/sessions/sessions.db`.
+Enable `FINANCE_ENABLED=true` with an Alpha Vantage API key to expose the `stock_trend` tool for 7-day price trends.
 Use `PROGRESS_EDIT_THROTTLE_MS`, `PROGRESS_KEEP_TIMELINE`, and `PROGRESS_TOOL_RESULT_MAX_CHARS` to tune how often Telegram messages are updated and how much tool output is surfaced. Define `WHITELISTED_USER_IDS` as a comma-separated list of Telegram user IDs to restrict access (leave empty to allow everyone). Use `HISTORY_PRUNE_ENABLED`, `HISTORY_PRUNE_THRESHOLD_ITEMS`, `HISTORY_KEEP_LAST_ITEMS`, and `HISTORY_SUMMARY_MAX_CHARS` to control automatic summarization of long conversations.
 
 ## Run the bot

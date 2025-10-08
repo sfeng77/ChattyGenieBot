@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     web_search_default_max_results: int = Field(5, alias="WEB_SEARCH_MAX_RESULTS")
     web_search_api_key: str | None = Field(None, alias="OLLAMA_API_KEY")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
+    log_file_path: Path = Field(Path("data") / "logs" / "chattygenie.log", alias="LOG_FILE_PATH")
+    finance_enabled: bool = Field(False, alias="FINANCE_ENABLED")
+    finance_provider: str = Field("alpha_vantage", alias="FINANCE_PROVIDER")
+    finance_api_key: str | None = Field(None, alias="FINANCE_API_KEY")
+    finance_timeout: float = Field(10.0, alias="FINANCE_TIMEOUT")
+    finance_default_window_days: int = Field(7, alias="FINANCE_WINDOW_DAYS")
+    finance_cache_ttl_minutes: int = Field(10, alias="FINANCE_CACHE_TTL_MINUTES")
     max_input_chars: int = Field(4000, alias="MAX_INPUT_CHARS")
     progress_edit_throttle_ms: int = Field(800, alias="PROGRESS_EDIT_THROTTLE_MS")
     progress_keep_timeline: bool = Field(False, alias="PROGRESS_KEEP_TIMELINE")
@@ -43,4 +50,5 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     settings = Settings()
     settings.sessions_db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.log_file_path.parent.mkdir(parents=True, exist_ok=True)
     return settings
