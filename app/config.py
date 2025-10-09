@@ -1,8 +1,12 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
+
+DEFAULT_LOG_DIR = Path("data") / "logs"
+DEFAULT_LOG_FILENAME = "chattygenie.log"
+DEFAULT_LOG_FILE_PATH = DEFAULT_LOG_DIR / DEFAULT_LOG_FILENAME
 
 
 class Settings(BaseSettings):
@@ -19,7 +23,8 @@ class Settings(BaseSettings):
     web_search_default_max_results: int = Field(5, alias="WEB_SEARCH_MAX_RESULTS")
     web_search_api_key: str | None = Field(None, alias="OLLAMA_API_KEY")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
-    log_file_path: Path = Field(Path("data") / "logs" / "chattygenie.log", alias="LOG_FILE_PATH")
+    log_dir: Path = Field(DEFAULT_LOG_DIR, alias="LOG_DIR")
+    log_file_path: Path = Field(DEFAULT_LOG_FILE_PATH, alias="LOG_FILE_PATH")
     finance_enabled: bool = Field(False, alias="FINANCE_ENABLED")
     finance_provider: str = Field("alpha_vantage", alias="FINANCE_PROVIDER")
     finance_api_key: str | None = Field(None, alias="FINANCE_API_KEY")
@@ -31,7 +36,10 @@ class Settings(BaseSettings):
     vision_temperature: float = Field(0.2, alias="VISION_TEMPERATURE")
     vision_timeout: float = Field(20.0, alias="VISION_TIMEOUT")
     vision_max_edge: int = Field(1280, alias="VISION_MAX_EDGE")
-    vision_system_prompt: str = Field("You are a concise vision assistant. Focus on factual observations and answer user questions about the image.", alias="VISION_SYSTEM_PROMPT")
+    vision_system_prompt: str = Field(
+        "You are a concise vision assistant. Focus on factual observations and answer user questions about the image.",
+        alias="VISION_SYSTEM_PROMPT",
+    )
     max_input_chars: int = Field(4000, alias="MAX_INPUT_CHARS")
     progress_edit_throttle_ms: int = Field(800, alias="PROGRESS_EDIT_THROTTLE_MS")
     progress_keep_timeline: bool = Field(False, alias="PROGRESS_KEEP_TIMELINE")
@@ -50,6 +58,13 @@ class Settings(BaseSettings):
         "extra": "ignore",
         "populate_by_name": True,
     }
+
+    @model_validator(mode="after")
+    def _apply_log_dir(self) -> "Settings":
+        if "log_file_path" not in self.model_fields_set:
+            filename = self.log_file_path.name
+            self.log_file_path = self.log_dir / filename
+        return self
 
 
 @lru_cache(maxsize=1)
