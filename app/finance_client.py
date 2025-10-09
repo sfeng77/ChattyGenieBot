@@ -44,7 +44,7 @@ class AlphaVantageClient:
             "apikey": self._api_key,
             "outputsize": "compact" if limit <= 100 else "full",
         }
-        LOGGER.debug("Requesting Alpha Vantage daily bars", extra={"symbol": symbol, "limit": limit})
+        LOGGER.info("Requesting Alpha Vantage daily bars", extra={"symbol": symbol, "limit": limit})
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.get(self._BASE_URL, params=params)
             response.raise_for_status()
@@ -64,7 +64,7 @@ class AlphaVantageClient:
             try:
                 date = datetime.strptime(date_str, "%Y-%m-%d")
             except ValueError as exc:
-                LOGGER.debug("Skipping invalid date from Alpha Vantage", exc_info=exc)
+                LOGGER.warning("Skipping invalid date from Alpha Vantage", exc_info=exc)
                 continue
             if not isinstance(values, dict):
                 continue
@@ -75,7 +75,7 @@ class AlphaVantageClient:
                 close_price = float(values.get("4. close"))
                 volume = int(float(values.get("5. volume")))
             except (TypeError, ValueError) as exc:
-                LOGGER.debug("Skipping malformed bar", exc_info=exc)
+                LOGGER.warning("Skipping malformed bar", exc_info=exc)
                 continue
             bars.append(
                 DailyBar(
@@ -92,7 +92,7 @@ class AlphaVantageClient:
         bars.sort(key=lambda bar: bar.date, reverse=True)
         if limit and len(bars) > limit:
             bars = bars[:limit]
-        LOGGER.debug("Fetched %s Alpha Vantage bars", len(bars))
+        LOGGER.info("Fetched %s Alpha Vantage bars", len(bars))
         return bars
 
 

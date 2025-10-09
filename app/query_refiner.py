@@ -34,7 +34,7 @@ async def refine_query(
     )
     prompt = "\n\n".join(prompt_parts)
 
-    LOGGER.debug("Refining search query (chars=%s)", len(prompt))
+    LOGGER.info("Refining search query (chars=%s)", len(prompt))
 
     chunks: list[str] = []
     try:
@@ -49,16 +49,16 @@ async def refine_query(
 
     refined = "".join(chunks).strip()
     if not refined:
-        LOGGER.debug("Refiner returned empty output; falling back to original text")
+        LOGGER.warning("Refiner returned empty output; falling back to original text")
         return user_text
 
     first_line = refined.splitlines()[0].strip().strip('"')
     if not first_line:
-        LOGGER.debug("Refiner produced no usable line; falling back to original text")
+        LOGGER.warning("Refiner produced no usable line; falling back to original text")
         return user_text
 
     truncated = first_line[:256]
-    LOGGER.debug("Refined query: %s", truncated)
+    LOGGER.info("Refined query: %s", truncated)
     return truncated
 
 

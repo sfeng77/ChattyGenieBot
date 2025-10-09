@@ -37,7 +37,7 @@ class ProgressDispatcher:
             try:
                 await listener(event)
             except Exception:  # noqa: BLE001
-                self._logger.debug("Progress listener failed", exc_info=True)
+                self._logger.warning("Progress listener failed", exc_info=True)
 
     def add_listener(self, listener: ProgressListener) -> Callable[[], None]:
         self._listeners.append(listener)

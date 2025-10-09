@@ -30,7 +30,7 @@ def create_disabled_web_search_tool(message: str | None = None):
     @function_tool(name_override="web_search")
     async def web_search(query: QueryArg, max_results: MaxResultsArg = None) -> Dict[str, Any]:
         """Inform callers that web search is disabled."""
-        LOGGER.debug("web_search requested while disabled: %s", query)
+        LOGGER.exception("web_search requested while disabled: %s", query)
         return {"results": [], "error": notice, "query": query}
 
     return web_search

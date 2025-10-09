@@ -47,7 +47,7 @@ def create_disabled_vision_tool(message: str | None = None):
 
     @function_tool(name_override="vision_analyze")
     async def vision_analyze(file_id: FileIdArg, caption: CaptionArg = None) -> Dict[str, object]:
-        LOGGER.debug("vision_analyze requested while disabled", extra={"file_id": file_id})
+        LOGGER.exception("vision_analyze requested while disabled", extra={"file_id": file_id})
         return {"error": notice, "file_id": file_id}
 
     return vision_analyze
@@ -85,7 +85,7 @@ def create_vision_tool(settings: Settings):
         try:
             answer = await analyze_image(prepared_bytes, caption, settings, mime_type=mime_type)
         except NotFoundError as exc:
-            LOGGER.warning("Vision model not available", extra={"file_id": file_id, "error_type": type(exc).__name__})
+            LOGGER.exception("Vision model not available", extra={"file_id": file_id, "error_type": type(exc).__name__})
             return {
                 "error": "vision model not available on this backend. Please verify the configured model supports image analysis.",
                 "file_id": file_id,

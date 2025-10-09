@@ -67,7 +67,7 @@ def create_disabled_finance_tool(message: str | None = None):
 
     @function_tool(name_override="stock_trend")
     async def stock_trend(symbol: SymbolArg, days: DaysArg = None) -> Dict[str, object]:
-        LOGGER.debug("stock_trend requested while disabled", extra={"symbol": symbol})
+        LOGGER.exception("stock_trend requested while disabled", extra={"symbol": symbol})
         return {"error": note, "symbol": symbol.upper()}
 
     return stock_trend

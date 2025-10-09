@@ -183,7 +183,7 @@ class AgentRuntime:
             try:
                 await self._maybe_prune_session(session)
             except Exception:  # noqa: BLE001
-                LOGGER.debug("History pruning failed", exc_info=True)
+                LOGGER.exception("History pruning failed", exc_info=True)
         hooks = None
         active_dispatcher: ProgressDispatcher | None = None
         if dispatcher is not None and enable_progress:
@@ -235,7 +235,7 @@ class AgentRuntime:
             await session.clear_session()
             await session.add_items([summary_item] + tail)
         except Exception:  # noqa: BLE001
-            LOGGER.debug("Failed to rewrite session history", exc_info=True)
+            LOGGER.exception("Failed to rewrite session history", exc_info=True)
 
     def _items_to_transcript(self, items: list[Dict[str, Any]], max_chars: int) -> str:
         segments: list[str] = []
@@ -286,7 +286,7 @@ class AgentRuntime:
         try:
             result = await Runner.run(summarizer, prompt, session=None, max_turns=1)
         except Exception:  # noqa: BLE001
-            LOGGER.debug("Summarizer call failed", exc_info=True)
+            LOGGER.exception("Summarizer call failed", exc_info=True)
             return ""
         output = result.final_output
         summary = output if isinstance(output, str) else ("" if output is None else str(output))
@@ -312,7 +312,7 @@ class AgentRuntime:
                 if inspect.isawaitable(result):
                     await result
             except Exception:  # noqa: BLE001
-                LOGGER.debug("Failed to clear session %s", self._session_id(chat_id), exc_info=True)
+                LOGGER.exception("Failed to clear session %s", self._session_id(chat_id), exc_info=True)
         close = getattr(session, "close", None)
         if callable(close):
             try:
@@ -320,7 +320,7 @@ class AgentRuntime:
                 if inspect.isawaitable(result):
                     await result
             except Exception:  # noqa: BLE001
-                LOGGER.debug("Failed to close session %s", self._session_id(chat_id), exc_info=True)
+                LOGGER.exception("Failed to close session %s", self._session_id(chat_id), exc_info=True)
 
     async def aclose(self) -> None:
         for session in list(self._sessions.values()):
@@ -331,7 +331,7 @@ class AgentRuntime:
                     if inspect.isawaitable(result):
                         await result
                 except Exception:  # noqa: BLE001
-                    LOGGER.debug("Failed to close session %s", session, exc_info=True)
+                    LOGGER.exception("Failed to close session %s", session, exc_info=True)
         self._sessions.clear()
 
 

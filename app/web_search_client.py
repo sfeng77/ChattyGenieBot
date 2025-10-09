@@ -30,7 +30,7 @@ class WebSearchClient:
             "Authorization": f"Bearer {self._api_key}",
         }
         url = f"{self._base_url}{self._endpoint}"
-        LOGGER.debug(
+        LOGGER.info(
             "Calling Ollama web search (url=%s, query=%s, max_results=%s)",
             url,
             query,
@@ -55,7 +55,7 @@ class WebSearchClient:
                     "snippet": snippet,
                 }
             )
-        LOGGER.debug("Web search returned %s results", len(normalized))
+        LOGGER.info("Web search returned %s results", len(normalized))
         return normalized
 
 

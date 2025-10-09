@@ -144,7 +144,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         await placeholder.edit_text(final_text)
     except Exception:  # noqa: BLE001
-        LOGGER.debug("Failed to edit vision placeholder", exc_info=True)
+        LOGGER.exception("Failed to edit vision placeholder", exc_info=True)
         await message.reply_text(final_text)
 
 
@@ -184,7 +184,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         try:
             await placeholder.edit_text(final_text)
         except Exception:  # noqa: BLE001
-            LOGGER.debug("Failed to edit message", exc_info=True)
+            LOGGER.exception("Failed to edit message", exc_info=True)
             await message.reply_text(final_text)
         return
 
@@ -222,7 +222,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await placeholder.edit_text(_format_timeline(timeline))
             last_edit = now
         except Exception:  # noqa: BLE001
-            LOGGER.debug("Progress edit failed", exc_info=True)
+            LOGGER.exception("Progress edit failed", exc_info=True)
 
     async def on_progress(event: ProgressEvent) -> None:
         nonlocal final_text, error_text
@@ -336,17 +336,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         await message.reply_text(final_plain)
     except Exception:  # noqa: BLE001
-        LOGGER.debug("Failed to send final message", exc_info=True)
+        LOGGER.exception("Failed to send final message", exc_info=True)
         try:
             await placeholder.edit_text(final_plain)
         except Exception:  # noqa: BLE001
-            LOGGER.debug("Fallback edit failed", exc_info=True)
+            LOGGER.exception("Fallback edit failed", exc_info=True)
             await message.reply_text(final_plain)
     if not keep_timeline:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=placeholder.message_id)
         except Exception:  # noqa: BLE001
-            LOGGER.debug("Failed to delete progress message", exc_info=True)
+            LOGGER.exception("Failed to delete progress message", exc_info=True)
 
 
 
