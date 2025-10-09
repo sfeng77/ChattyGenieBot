@@ -134,6 +134,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     placeholder = await message.reply_text("Analyzing image...")
 
     try:
+        LOGGER.info("Running vision agent with input:\n%s", agent_input)
         response = await runtime.run_message(chat_id, agent_input)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Agent vision run failed")

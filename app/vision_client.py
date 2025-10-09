@@ -12,6 +12,21 @@ from app.config import Settings
 LOGGER = logging.getLogger(__name__)
 
 
+def _extract_status_code(exc: Exception) -> Optional[int]:
+    """Best-effort HTTP status extraction for logging."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    response = getattr(exc, "response", None)
+    if response is not None:
+        response_code = getattr(response, "status_code", None)
+        if isinstance(response_code, int):
+            return response_code
+    return None
+
+
 async def analyze_image(
     image_bytes: bytes,
     caption: Optional[str],
@@ -28,23 +43,7 @@ async def analyze_image(
     system_prompt = settings.vision_system_prompt.strip() or "You are a concise vision assistant."
     request_temperature = temperature if temperature is not None else settings.vision_temperature
 
-    input_messages = [
-        {
-            "role": "system",
-            "content": [
-                {"type": "text", "text": system_prompt},
-            ],
-        },
-        {
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": prompt_text},
-                {"type": "input_image", "image_base64": encoded},
-            ],
-        },
-    ]
-
-    LOGGER.debug(
+    LOGGER.info(
         "Calling vision model",
         extra={
             "model": settings.vision_model,
@@ -60,14 +59,6 @@ async def analyze_image(
 
     async with AsyncOpenAI(**client_params) as client:
         try:
-            response = await client.responses.create(
-                model=settings.vision_model,
-                input=input_messages,
-                temperature=request_temperature,
-                max_output_tokens=max_output_tokens,
-            )
-        except Exception as exc:
-            LOGGER.info("Vision responses endpoint failed; attempting chat fallback", extra={"error_type": type(exc).__name__})
             fallback_text = await _run_chat_fallback(
                 client=client,
                 model=settings.vision_model,
@@ -76,26 +67,11 @@ async def analyze_image(
                 data_url=data_url,
                 temperature=request_temperature,
                 max_output_tokens=max_output_tokens,
-                original_exception=exc,
             )
-            if fallback_text is not None:
-                return fallback_text
-            raise
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Vision model request failed", exc_info=True)        
 
-    return _extract_text_from_response(response)
-
-
-def _extract_text_from_response(response) -> str:
-    for item in response.output or []:
-        for piece in item.get("content", []):
-            if piece.get("type") in {"output_text", "text"}:
-                text = (piece.get("text") or "").strip()
-                if text:
-                    return text
-    if hasattr(response, "output_text") and response.output_text:
-        return response.output_text.strip()
-    raise RuntimeError("vision model returned no text output")
-
+    return fallback_text
 
 async def _run_chat_fallback(
     *,
@@ -106,18 +82,8 @@ async def _run_chat_fallback(
     data_url: str,
     temperature: float,
     max_output_tokens: int,
-    original_exception: Exception,
 ) -> Optional[str]:
     """Try chat.completions as a fallback when responses.create is unavailable."""
-    status = None
-    if isinstance(original_exception, httpx.HTTPStatusError):
-        status = original_exception.response.status_code
-    elif hasattr(original_exception, "status_code"):
-        status = getattr(original_exception, "status_code")
-
-    message = str(original_exception)
-    if status not in {404, 405, 501} and "404" not in message and "Not Found" not in message:
-        return None
 
     messages = [
         {
@@ -143,7 +109,18 @@ async def _run_chat_fallback(
             max_tokens=max_output_tokens,
         )
     except Exception as exc:
-        LOGGER.info("Chat fallback failed", extra={"error_type": type(exc).__name__})
+        fallback_status = _extract_status_code(exc)
+        LOGGER.exception(
+            "Chat fallback failed (status=%s): %s",
+            fallback_status if fallback_status is not None else "n/a",
+            exc,
+            extra={
+                "error_type": type(exc).__name__,
+                "status_code": fallback_status,
+                "error_message": str(exc),
+            },
+            exc_info=True,
+        )
         return None
 
     for choice in chat.choices or []:

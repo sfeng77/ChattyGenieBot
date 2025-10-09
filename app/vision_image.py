@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from io import BytesIO
+import logging
 from typing import Tuple
 
 from PIL import Image
+LOGGER = logging.getLogger(__name__)
 
 
 def prepare_image(data: bytes, max_edge: int) -> tuple[bytes, Tuple[int, int], str]:
@@ -18,4 +20,5 @@ def prepare_image(data: bytes, max_edge: int) -> tuple[bytes, Tuple[int, int], s
             img = img.resize(new_size, Image.LANCZOS)
         output = BytesIO()
         img.save(output, format="JPEG", quality=85, optimize=True)
+        LOGGER.info("Prepared image size %s -> %s", (width, height), img.size)
         return output.getvalue(), img.size, "image/jpeg"
