@@ -18,18 +18,36 @@ def setup_logging(settings: "Settings") -> None:
     fmt = "%(asctime)s %(levelname)s %(name)s | %(message)s"
 
     file_handler = logging.FileHandler(settings.log_file_path, encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.INFO)
 
     console_handler = logging.StreamHandler()
     console_handler.setLevel(log_level)
 
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format=fmt,
         handlers=[console_handler, file_handler],
         force=True,
     )
 
-    logging.getLogger("httpx").setLevel(log_level)
-    logging.getLogger(__name__).info("Logging configured (console_level=%s, file=%s)", logging.getLevelName(log_level), settings.log_file_path)
+    low_level_level = logging.DEBUG if log_level <= logging.DEBUG else logging.WARNING
+    noisy_specs: dict[str, int] = {
+        "httpx": low_level_level,
+        "httpcore": low_level_level,
+        "telegram": low_level_level,
+        "telegram.ext": low_level_level,
+    }
+    for name, level in noisy_specs.items():
+        logging.getLogger(name).setLevel(level)
+
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("openai._base_client").setLevel(logging.WARNING)
+    logging.getLogger("openai.agents").setLevel(logging.INFO)
+    logging.getLogger("app").setLevel(logging.INFO)
+
+    logging.getLogger(__name__).info(
+        "Logging configured (console_level=%s, file=%s)",
+        logging.getLevelName(log_level),
+        settings.log_file_path,
+    )
     _configured = True

@@ -84,8 +84,14 @@ def create_vision_tool(settings: Settings):
 
         try:
             answer = await analyze_image(prepared_bytes, caption, settings, mime_type=mime_type)
+        except NotFoundError as exc:
+            LOGGER.warning("Vision model not available", extra={"file_id": file_id, "error_type": type(exc).__name__})
+            return {
+                "error": "vision model not available on this backend. Please verify the configured model supports image analysis.",
+                "file_id": file_id,
+            }
         except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Vision model call failed", extra={"file_id": file_id})
+            LOGGER.exception("Vision model call failed", extra={"file_id": file_id, "error_type": type(exc).__name__})
             return {
                 "error": f"vision model error: {exc}",
                 "file_id": file_id,

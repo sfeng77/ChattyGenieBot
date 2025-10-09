@@ -69,7 +69,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
         return
-    LOGGER.debug("/start invoked by chat_id=%s", message.chat_id)
+    LOGGER.info("/start invoked by chat_id=%s", message.chat_id)
     await message.reply_text("Hi! I am Agent Mushroom. Send me a message and I will reply using OpenAI Agents.")
 
 
@@ -78,7 +78,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message = update.effective_message
     if message is None:
         return
-    LOGGER.debug("/help invoked by chat_id=%s", message.chat_id)
+    LOGGER.info("/help invoked by chat_id=%s", message.chat_id)
     await message.reply_text("Commands:\n/start - welcome message\n/reset - clear conversation memory\n/progress - toggle live progress updates for this chat")
 
 
@@ -87,7 +87,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
         return
-    LOGGER.debug("/reset invoked by chat_id=%s", message.chat_id)
+    LOGGER.info("/reset invoked by chat_id=%s", message.chat_id)
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
     await runtime.reset(message.chat_id)
     await message.reply_text("Conversation memory cleared.")
@@ -156,14 +156,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     chat_id = message.chat_id
     user_text = message.text.strip()
-    LOGGER.debug("Received text message (chat_id=%s, chars=%s)", chat_id, len(user_text))
+    LOGGER.info("Received text message (chat_id=%s, chars=%s)", chat_id, len(user_text))
     if not user_text:
         await message.reply_text("Please send some text.")
         return
 
     settings: Settings = context.application.bot_data[SETTINGS_KEY]
     if len(user_text) > settings.max_input_chars:
-        LOGGER.debug("Message exceeds max_input_chars=%s", settings.max_input_chars)
+        LOGGER.info("Message exceeds max_input_chars=%s", settings.max_input_chars)
         await message.reply_text(f"Message too long. Limit is {settings.max_input_chars} characters.")
         return
 
@@ -239,9 +239,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             preview = meta.get("prompt_preview")
             system_prompt = meta.get("system_prompt")
             if preview:
-                LOGGER.debug("Prompt preview: %s", _truncate(str(preview), 160))
+                LOGGER.info("Prompt preview: %s", _truncate(str(preview), 160))
             if system_prompt:
-                LOGGER.debug("System prompt snapshot: %s", _truncate(str(system_prompt), 160))
+                LOGGER.info("System prompt snapshot: %s", _truncate(str(system_prompt), 160))
             timeline.append(_timeline_line(meta, "[model]", "model call started"))
             _trim_timeline()
             await apply_edit()
@@ -367,7 +367,7 @@ def _parse_whitelist(raw: str | None) -> Set[int]:
 
 
 def build_application(settings: Settings) -> Application:
-    LOGGER.debug("Building application with model=%s", settings.openai_model)
+    LOGGER.info("Building application with model=%s", settings.openai_model)
     runtime = AgentRuntime(settings)
 
     application = Application.builder().token(settings.telegram_bot_token).build()
@@ -386,7 +386,7 @@ def build_application(settings: Settings) -> Application:
 
 
 async def shutdown(application: Application) -> None:
-    LOGGER.debug("Shutting down application")
+    LOGGER.info("Shutting down application")
     runtime: AgentRuntime = application.bot_data.get(AGENT_RUNTIME_KEY)
     if runtime is not None:
         await runtime.aclose()
@@ -396,6 +396,7 @@ __all__ = [
     "build_application",
     "shutdown",
 ]
+
 
 
 

@@ -67,7 +67,7 @@ async def analyze_image(
                 max_output_tokens=max_output_tokens,
             )
         except Exception as exc:
-            LOGGER.debug("Vision responses endpoint failed, attempting chat fallback", exc_info=True)
+            LOGGER.info("Vision responses endpoint failed; attempting chat fallback", extra={"error_type": type(exc).__name__})
             fallback_text = await _run_chat_fallback(
                 client=client,
                 model=settings.vision_model,
@@ -142,8 +142,8 @@ async def _run_chat_fallback(
             temperature=temperature,
             max_tokens=max_output_tokens,
         )
-    except Exception:
-        LOGGER.debug("Chat fallback failed", exc_info=True)
+    except Exception as exc:
+        LOGGER.info("Chat fallback failed", extra={"error_type": type(exc).__name__})
         return None
 
     for choice in chat.choices or []:
