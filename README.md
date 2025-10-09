@@ -46,11 +46,18 @@ FINANCE_API_KEY=
 FINANCE_TIMEOUT=10
 FINANCE_WINDOW_DAYS=7
 FINANCE_CACHE_TTL_MINUTES=10
+VISION_ENABLED=false
+VISION_MODEL=gemma3:12b
+VISION_TEMPERATURE=0.2
+VISION_TIMEOUT=20
+VISION_MAX_EDGE=1280
+VISION_SYSTEM_PROMPT=You are a concise vision assistant. Focus on factual observations and answer user questions about the image.
 ```
 
 `OPENAI_API_BASE` defaults to the local Ollama OpenAI-compatible endpoint. Set `WEB_SEARCH_ENABLED=true` to expose the `web_search` tool; the Ollama API key is required and is sent as `Authorization: Bearer <OLLAMA_API_KEY>`.
 `SESSIONS_DB_PATH` may be set if you need a custom storage location. By default, session state lives at `data/sessions/sessions.db`.
 Enable `FINANCE_ENABLED=true` with an Alpha Vantage API key to expose the `stock_trend` tool for 7-day price trends.
+Enable `VISION_ENABLED=true` to let the agent analyze Telegram photos with the configured vision model.
 Use `PROGRESS_EDIT_THROTTLE_MS`, `PROGRESS_KEEP_TIMELINE`, and `PROGRESS_TOOL_RESULT_MAX_CHARS` to tune how often Telegram messages are updated and how much tool output is surfaced. Define `WHITELISTED_USER_IDS` as a comma-separated list of Telegram user IDs to restrict access (leave empty to allow everyone). Use `HISTORY_PRUNE_ENABLED`, `HISTORY_PRUNE_THRESHOLD_ITEMS`, `HISTORY_KEEP_LAST_ITEMS`, and `HISTORY_SUMMARY_MAX_CHARS` to control automatic summarization of long conversations.
 
 ## Run the bot

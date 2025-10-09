@@ -23,9 +23,11 @@ from app.finance_client import AlphaVantageClient
 from app.prompt import get_agent_instructions
 from app.tools import (
     create_disabled_finance_tool,
+    create_disabled_vision_tool,
     create_disabled_web_search_tool,
     create_ollama_web_search_tool,
     create_stock_trend_tool,
+    create_vision_tool,
 )
 from app.web_search_client import WebSearchClient
 
@@ -49,8 +51,10 @@ class AgentRuntime:
         tools: List[object] = []
         self._web_search_tool = None
         self._finance_tool = None
+        self._vision_tool = None
         web_search_available = False
         finance_available = False
+        vision_available = False
         if settings.web_search_enabled:
             try:
                 self._web_search_tool = self._build_web_search_tool()
@@ -83,7 +87,23 @@ class AgentRuntime:
             )
             self._finance_tool = create_disabled_finance_tool(message=notice)
             tools.append(self._finance_tool)
-        instructions = get_agent_instructions(web_search_available, finance_available)
+        if settings.vision_enabled:
+            try:
+                self._vision_tool = self._build_vision_tool()
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to initialize vision tool")
+            else:
+                tools.append(self._vision_tool)
+                vision_available = True
+        if self._vision_tool is None:
+            notice = (
+                "vision_analyze is currently unavailable."
+                if settings.vision_enabled
+                else "vision_analyze is disabled for this deployment."
+            )
+            self._vision_tool = create_disabled_vision_tool(message=notice)
+            tools.append(self._vision_tool)
+        instructions = get_agent_instructions(web_search_available, finance_available, vision_available)
         self._agent = Agent(
             name="Chatty Genie",
             instructions=instructions,
@@ -124,6 +144,9 @@ class AgentRuntime:
             default_window_days=self._settings.finance_default_window_days,
             cache_ttl_minutes=self._settings.finance_cache_ttl_minutes,
         )
+
+    def _build_vision_tool(self):
+        return create_vision_tool(self._settings)
 
     def _session_id(self, chat_id: int) -> str:
         return f"chat-{chat_id}"

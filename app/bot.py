@@ -106,6 +106,50 @@ async def toggle_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 @require_authorized
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None or not message.photo:
+        return
+    settings: Settings = context.application.bot_data[SETTINGS_KEY]
+    if not settings.vision_enabled:
+        await message.reply_text("Image analysis is disabled for this deployment.")
+        return
+
+    photo = message.photo[-1]
+    file_id = photo.file_id
+    caption = (message.caption or "").strip()
+
+    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    chat_id = message.chat_id
+
+    user_lines = ["User sent an image.", f"telegram_file_id={file_id}"]
+    if caption:
+        user_lines.append(f"Caption: {caption}")
+    else:
+        user_lines.append("Caption: (none provided)")
+    user_lines.append("Use the vision_analyze tool if you need to inspect the image before answering.")
+    agent_input = "\n".join(user_lines)
+
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    placeholder = await message.reply_text("Analyzing image...")
+
+    try:
+        response = await runtime.run_message(chat_id, agent_input)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Agent vision run failed")
+        await placeholder.edit_text(f"Agent error: {exc}")
+        return
+
+    final_text = (response or "").strip() or "I am sorry, I could not describe that image."
+    try:
+        await placeholder.edit_text(final_text)
+    except Exception:  # noqa: BLE001
+        LOGGER.debug("Failed to edit vision placeholder", exc_info=True)
+        await message.reply_text(final_text)
+
+
+
+@require_authorized
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None or not message.text:
@@ -335,6 +379,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("progress", toggle_progress))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
 
     return application
