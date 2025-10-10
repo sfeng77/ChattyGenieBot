@@ -121,6 +121,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
     chat_id = message.chat_id
+    from_user = message.from_user
+    sender_id: str | None = str(from_user.id) if from_user and from_user.id is not None else None
 
     user_lines = ["User sent an image.", f"telegram_file_id={file_id}"]
     if caption:
@@ -135,7 +137,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         LOGGER.info("Running vision agent with input:\n%s", agent_input)
-        response = await runtime.run_message(chat_id, agent_input)
+        response = await runtime.run_message(chat_id, agent_input, sender_id=sender_id)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Agent vision run failed")
         await placeholder.edit_text(f"Agent error: {exc}")
@@ -156,6 +158,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if message is None or not message.text:
         return
     chat_id = message.chat_id
+    from_user = message.from_user
+    sender_id: str | None = str(from_user.id) if from_user and from_user.id is not None else None
     user_text = message.text.strip()
     LOGGER.info("Received text message (chat_id=%s, chars=%s)", chat_id, len(user_text))
     if not user_text:
@@ -176,7 +180,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not progress_enabled:
         try:
-            response = await runtime.run_message(chat_id, user_text)
+            response = await runtime.run_message(chat_id, user_text, sender_id=sender_id)
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Agent run failed")
             await placeholder.edit_text(f"Agent error: {exc}")
@@ -319,7 +323,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         try:
-            response = await runtime.run_message_with_progress(chat_id, user_text, dispatcher, enable_progress=True)
+            response = await runtime.run_message_with_progress(chat_id, user_text, dispatcher, enable_progress=True, sender_id=sender_id)
         except Exception as exc:  # noqa: BLE001
             if error_text is None:
                 error_text = str(exc)

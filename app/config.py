@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     history_summary_max_chars: int = Field(800, alias="HISTORY_SUMMARY_MAX_CHARS")
     whitelisted_user_ids: str | None = Field(None, alias="WHITELISTED_USER_IDS")
     sessions_db_path: Path = Field(Path("data") / "sessions" / "sessions.db", alias="SESSIONS_DB_PATH")
+    chat_history_db_path: Path = Field(Path("data") / "history" / "chat_history.db", alias="CHAT_HISTORY_DB_PATH")
 
     model_config = {
         "env_file": ".env",
@@ -71,5 +72,6 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     settings = Settings()
     settings.sessions_db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.chat_history_db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.log_file_path.parent.mkdir(parents=True, exist_ok=True)
     return settings

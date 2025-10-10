@@ -40,6 +40,8 @@ HISTORY_PRUNE_ENABLED=true
 HISTORY_PRUNE_THRESHOLD_ITEMS=60
 HISTORY_KEEP_LAST_ITEMS=12
 HISTORY_SUMMARY_MAX_CHARS=800
+SESSIONS_DB_PATH=data/sessions/sessions.db
+CHAT_HISTORY_DB_PATH=data/history/chat_history.db
 FINANCE_ENABLED=false
 FINANCE_PROVIDER=alpha_vantage
 FINANCE_API_KEY=
@@ -56,6 +58,7 @@ VISION_SYSTEM_PROMPT=You are a concise vision assistant. Focus on factual observ
 
 `OPENAI_API_BASE` defaults to the local Ollama OpenAI-compatible endpoint. Set `WEB_SEARCH_ENABLED=true` to expose the `web_search` tool; the Ollama API key is required and is sent as `Authorization: Bearer <OLLAMA_API_KEY>`.
 `SESSIONS_DB_PATH` may be set if you need a custom storage location. By default, session state lives at `data/sessions/sessions.db`.
+`CHAT_HISTORY_DB_PATH` points to the persistent conversational store (defaults to `data/history/chat_history.db`). This database keeps every turn, powers keyword search via FTS5, and feeds recap/QA helpers.
 Enable `FINANCE_ENABLED=true` with an Alpha Vantage API key to expose the `stock_trend` tool for 7-day price trends.
 Enable `VISION_ENABLED=true` to let the agent analyze Telegram photos with the configured vision model.
 Use `PROGRESS_EDIT_THROTTLE_MS`, `PROGRESS_KEEP_TIMELINE`, and `PROGRESS_TOOL_RESULT_MAX_CHARS` to tune how often Telegram messages are updated and how much tool output is surfaced. Define `WHITELISTED_USER_IDS` as a comma-separated list of Telegram user IDs to restrict access (leave empty to allow everyone). Use `HISTORY_PRUNE_ENABLED`, `HISTORY_PRUNE_THRESHOLD_ITEMS`, `HISTORY_KEEP_LAST_ITEMS`, and `HISTORY_SUMMARY_MAX_CHARS` to control automatic summarization of long conversations.
@@ -71,8 +74,16 @@ Commands:
 - `/reset` - clear the conversation memory for the current chat
 - `/progress` - toggle live progress updates
 
+## Chat history helpers
+- `AgentRuntime.search_history(chat_id, query, limit=50)` returns keyword matches with snippets.
+- `AgentRuntime.get_history_messages(chat_id, start=None, end=None, limit=None)` returns raw message rows (chronological).
+- Stored rows capture optional `sender_id` so group chats keep speakers separate.
+- `await AgentRuntime.recap_history(chat_id, start=None, end=None, max_chars=None)` summarizes a window using the configured model.
+- `await AgentRuntime.answer_from_history(chat_id, question, top_k=20)` answers questions grounded in past turns and returns both the answer and the supporting context.
+
 ## Notes
 - Conversation memory is managed by OpenAI Agents sessions; we keep one SQLite session per chat ID.
+- Long-term chat history is mirrored into the FTS-backed `chat_history.db`, so you can rebuild transcripts, run keyword search, or generate summaries without touching the Agents session files.
 - Use /progress to toggle live tool/model status updates while a turn is running.
 - When the web search tool is enabled, the agent will call it for time-sensitive questions and respond with short citations.
 - Refer to the OpenAI Agents Python quickstart (https://openai.github.io/openai-agents-python/quickstart/) for extending the agent with tools or different models.

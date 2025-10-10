@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any, Dict, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from agents import (
     Agent,
@@ -21,6 +22,7 @@ from app.progress import NullProgressDispatcher, ProgressDispatcher
 from app.progress_hooks import ProgressHooks
 from app.finance_client import AlphaVantageClient
 from app.prompt import get_agent_instructions
+from app.storage.chat_store import ChatStore
 from app.tools import (
     create_disabled_finance_tool,
     create_disabled_vision_tool,
@@ -112,6 +114,7 @@ class AgentRuntime:
             tools=tools,
         )
         self._sessions: Dict[int, SQLiteSession] = {}
+        self._chat_store = ChatStore(settings.chat_history_db_path)
 
     def _build_web_search_tool(self):
         client = WebSearchClient(
@@ -151,6 +154,9 @@ class AgentRuntime:
     def _session_id(self, chat_id: int) -> str:
         return f"chat-{chat_id}"
 
+    def _history_id(self, chat_id: int) -> str:
+        return self._session_id(chat_id)
+
     def _get_session(self, chat_id: int) -> SQLiteSession:
         session = self._sessions.get(chat_id)
         if session is None:
@@ -158,8 +164,14 @@ class AgentRuntime:
             self._sessions[chat_id] = session
         return session
 
-    async def run_message(self, chat_id: int, user_message: str) -> str:
-        return await self._run(chat_id, user_message, dispatcher=None, enable_progress=False)
+    async def run_message(self, chat_id: int, user_message: str, *, sender_id: str | None = None) -> str:
+        return await self._run(
+            chat_id,
+            user_message,
+            dispatcher=None,
+            enable_progress=False,
+            sender_id=sender_id,
+        )
 
     async def run_message_with_progress(
         self,
@@ -167,9 +179,17 @@ class AgentRuntime:
         user_message: str,
         dispatcher: ProgressDispatcher | None,
         enable_progress: bool,
+        *,
+        sender_id: str | None = None,
     ) -> str:
         dispatcher = dispatcher or NullProgressDispatcher()
-        return await self._run(chat_id, user_message, dispatcher=dispatcher, enable_progress=enable_progress)
+        return await self._run(
+            chat_id,
+            user_message,
+            dispatcher=dispatcher,
+            enable_progress=enable_progress,
+            sender_id=sender_id,
+        )
 
     async def _run(
         self,
@@ -177,6 +197,8 @@ class AgentRuntime:
         user_message: str,
         dispatcher: ProgressDispatcher | None,
         enable_progress: bool,
+        *,
+        sender_id: str | None = None,
     ) -> str:
         session = self._get_session(chat_id)
         if self._settings.history_prune_enabled:
@@ -184,6 +206,16 @@ class AgentRuntime:
                 await self._maybe_prune_session(session)
             except Exception:  # noqa: BLE001
                 LOGGER.exception("History pruning failed", exc_info=True)
+        history_id = self._history_id(chat_id)
+        try:
+            self._chat_store.add_message(
+                external_conversation_id=history_id,
+                role="user",
+                content=user_message,
+                sender_id=sender_id,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to persist user message", exc_info=True)
         hooks = None
         active_dispatcher: ProgressDispatcher | None = None
         if dispatcher is not None and enable_progress:
@@ -213,10 +245,136 @@ class AgentRuntime:
             raise
         output = result.final_output
         if isinstance(output, str):
-            return output.strip()
-        if output is None:
+            response = output.strip()
+        elif output is None:
+            response = ""
+        else:
+            response = str(output).strip()
+        if response:
+            try:
+                self._chat_store.add_message(
+                    external_conversation_id=history_id,
+                    role="assistant",
+                    content=response,
+                    sender_id="assistant",
+                )
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to persist assistant message", exc_info=True)
+        return response
+
+    def search_history(self, chat_id: int, query: str, *, limit: int = 50) -> List[Dict[str, Any]]:
+        history_id = self._history_id(chat_id)
+        try:
+            return self._chat_store.search_messages(
+                query,
+                external_conversation_id=history_id,
+                limit=limit,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("History search failed", exc_info=True)
+            return []
+
+    def get_history_messages(
+        self,
+        chat_id: int,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        history_id = self._history_id(chat_id)
+        try:
+            return self._chat_store.get_messages_in_range(
+                external_conversation_id=history_id,
+                start=start,
+                end=end,
+                limit=limit,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("History fetch failed", exc_info=True)
+            return []
+
+    async def recap_history(
+        self,
+        chat_id: int,
+        *,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        max_chars: Optional[int] = None,
+    ) -> str:
+        max_chars = max_chars or self._settings.history_summary_max_chars
+        messages = self.get_history_messages(chat_id, start=start, end=end)
+        if not messages:
             return ""
-        return str(output).strip()
+        transcript = self._messages_to_transcript(messages, max_chars * 4)
+        summary = await self._summarize_transcript(transcript, max_chars=max_chars)
+        if summary:
+            return summary
+        return self._fallback_summary(transcript, max_chars)
+
+    async def answer_from_history(
+        self,
+        chat_id: int,
+        question: str,
+        *,
+        top_k: int = 20,
+        max_chars: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        max_chars = max_chars or self._settings.history_summary_max_chars
+        hits = self.search_history(chat_id, question, limit=top_k)
+        if not hits:
+            return {"answer": "", "context": []}
+        context = self._order_history_hits(hits)
+        context_text = self._format_history_context(context, max_chars * 6)
+        prompt = (
+            "You are a helpful assistant. Answer the user's question using only the provided chat history. "
+            "If the history does not contain the answer, reply with 'I do not have enough information.'\n\n"
+            f"History:\n{context_text}\n\nQuestion: {question}\nAnswer:"
+        )
+        responder = Agent(
+            name="History QA",
+            instructions="Answer questions based strictly on the given history.",
+            model=self._settings.openai_model,
+            model_settings=ModelSettings(temperature=0.1),
+            tools=[],
+        )
+        try:
+            result = await Runner.run(responder, prompt, session=None, max_turns=1)
+            output = result.final_output
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("History QA failed", exc_info=True)
+            return {"answer": "", "context": context}
+        answer = output if isinstance(output, str) else ("" if output is None else str(output))
+        return {"answer": answer.strip(), "context": context}
+
+    def _messages_to_transcript(self, messages: List[Dict[str, Any]], max_chars: int) -> str:
+        items: List[Dict[str, Any]] = []
+        for message in messages:
+            items.append({"role": message.get("role", "user"), "content": message.get("content", "")})
+        return self._items_to_transcript(items, max_chars=max_chars)
+
+    def _order_history_hits(self, hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        def sort_key(item: Dict[str, Any]) -> tuple:
+            created = item.get("created_at") or ""
+            return created, item.get("id", 0)
+
+        return sorted(hits, key=sort_key)
+
+    def _format_history_context(self, messages: List[Dict[str, Any]], max_chars: int) -> str:
+        segments: List[str] = []
+        for entry in messages:
+            timestamp = entry.get("created_at", "")
+            role = entry.get("role", "user")
+            sender = entry.get("sender_id") or ""
+            content = (entry.get("content") or "").strip()
+            if not content:
+                continue
+            sender_part = f"[{sender}]" if sender else ""
+            segments.append(f"[{timestamp}][{role}]{sender_part} {content}")
+        text = "\n".join(segments)
+        if len(text) > max_chars:
+            return text[-max_chars:]
+        return text
 
     async def _maybe_prune_session(self, session: SQLiteSession) -> None:
         keep_last = max(1, int(self._settings.history_keep_last_items))
@@ -333,6 +491,10 @@ class AgentRuntime:
                 except Exception:  # noqa: BLE001
                     LOGGER.exception("Failed to close session %s", session, exc_info=True)
         self._sessions.clear()
+        try:
+            self._chat_store.close()
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to close chat store", exc_info=True)
 
 
 __all__ = ["AgentRuntime"]
