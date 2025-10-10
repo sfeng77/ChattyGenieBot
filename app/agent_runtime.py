@@ -164,13 +164,14 @@ class AgentRuntime:
             self._sessions[chat_id] = session
         return session
 
-    async def run_message(self, chat_id: int, user_message: str, *, sender_id: str | None = None) -> str:
+    async def run_message(self, chat_id: int, user_message: str, *, sender_id: str | None = None, log_user: bool = True) -> str:
         return await self._run(
             chat_id,
             user_message,
             dispatcher=None,
             enable_progress=False,
             sender_id=sender_id,
+            log_user=log_user,
         )
 
     async def run_message_with_progress(
@@ -181,6 +182,7 @@ class AgentRuntime:
         enable_progress: bool,
         *,
         sender_id: str | None = None,
+        log_user: bool = True,
     ) -> str:
         dispatcher = dispatcher or NullProgressDispatcher()
         return await self._run(
@@ -189,6 +191,7 @@ class AgentRuntime:
             dispatcher=dispatcher,
             enable_progress=enable_progress,
             sender_id=sender_id,
+            log_user=log_user,
         )
 
     async def _run(
@@ -199,6 +202,7 @@ class AgentRuntime:
         enable_progress: bool,
         *,
         sender_id: str | None = None,
+        log_user: bool = True,
     ) -> str:
         session = self._get_session(chat_id)
         if self._settings.history_prune_enabled:
@@ -207,15 +211,16 @@ class AgentRuntime:
             except Exception:  # noqa: BLE001
                 LOGGER.exception("History pruning failed", exc_info=True)
         history_id = self._history_id(chat_id)
-        try:
-            self._chat_store.add_message(
-                external_conversation_id=history_id,
-                role="user",
-                content=user_message,
-                sender_id=sender_id,
-            )
-        except Exception:  # noqa: BLE001
-            LOGGER.exception("Failed to persist user message", exc_info=True)
+        if log_user:
+            try:
+                self._chat_store.add_message(
+                    external_conversation_id=history_id,
+                    role="user",
+                    content=user_message,
+                    sender_id=sender_id,
+                )
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to persist user message", exc_info=True)
         hooks = None
         active_dispatcher: ProgressDispatcher | None = None
         if dispatcher is not None and enable_progress:
@@ -273,6 +278,30 @@ class AgentRuntime:
         except Exception:  # noqa: BLE001
             LOGGER.exception("History search failed", exc_info=True)
             return []
+
+    def log_message(
+        self,
+        chat_id: int,
+        *,
+        content: str,
+        role: str = "user",
+        sender_id: Optional[str] = None,
+        created_at: Optional[datetime] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist a message into the chat history without running the agent."""
+        history_id = self._history_id(chat_id)
+        try:
+            self._chat_store.add_message(
+                external_conversation_id=history_id,
+                role=role,
+                content=content or "",
+                created_at=created_at,
+                metadata=metadata,
+                sender_id=sender_id,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to log message", exc_info=True)
 
     def get_history_messages(
         self,
@@ -498,4 +527,3 @@ class AgentRuntime:
 
 
 __all__ = ["AgentRuntime"]
-

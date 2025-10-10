@@ -20,6 +20,8 @@ MAX_PROGRESS_CHARS = 3000
 SETTINGS_KEY = "settings"
 AGENT_RUNTIME_KEY = "agent_runtime"
 WHITELIST_KEY = "whitelist_user_ids"
+BOT_ID_KEY = "bot_id"
+BOT_USERNAME_KEY = "bot_username"
 
 HandlerFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
@@ -70,6 +72,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message is None:
         return
     LOGGER.info("/start invoked by chat_id=%s", message.chat_id)
+    # Log the command
+    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    from_user = message.from_user
+    runtime.log_message(
+        message.chat_id,
+        content=message.text or "/start",
+        sender_id=str(from_user.id) if from_user and from_user.id is not None else None,
+        created_at=message.date,
+        metadata={"telegram_message_id": message.id},
+    )
     await message.reply_text("Hi! I am Agent Mushroom. Send me a message and I will reply using OpenAI Agents.")
 
 
@@ -79,6 +91,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if message is None:
         return
     LOGGER.info("/help invoked by chat_id=%s", message.chat_id)
+    # Log the command
+    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    from_user = message.from_user
+    runtime.log_message(
+        message.chat_id,
+        content=message.text or "/help",
+        sender_id=str(from_user.id) if from_user and from_user.id is not None else None,
+        created_at=message.date,
+        metadata={"telegram_message_id": message.id},
+    )
     await message.reply_text("Commands:\n/start - welcome message\n/reset - clear conversation memory\n/progress - toggle live progress updates for this chat")
 
 
@@ -88,6 +110,16 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message is None:
         return
     LOGGER.info("/reset invoked by chat_id=%s", message.chat_id)
+    # Log the command
+    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    from_user = message.from_user
+    runtime.log_message(
+        message.chat_id,
+        content=message.text or "/reset",
+        sender_id=str(from_user.id) if from_user and from_user.id is not None else None,
+        created_at=message.date,
+        metadata={"telegram_message_id": message.id},
+    )
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
     await runtime.reset(message.chat_id)
     await message.reply_text("Conversation memory cleared.")
@@ -102,6 +134,16 @@ async def toggle_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     new_state = not current
     context.chat_data["progress_enabled"] = new_state
     status = "enabled" if new_state else "disabled"
+    # Log the command
+    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    from_user = message.from_user
+    runtime.log_message(
+        message.chat_id,
+        content=message.text or "/progress",
+        sender_id=str(from_user.id) if from_user and from_user.id is not None else None,
+        created_at=message.date,
+        metadata={"telegram_message_id": message.id, "progress_enabled": new_state},
+    )
     await message.reply_text(f"Progress updates {status} for this chat.")
 
 
@@ -131,13 +173,38 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user_lines.append("Caption: (none provided)")
     user_lines.append("Use the vision_analyze tool if you need to inspect the image before answering.")
     agent_input = "\n".join(user_lines)
+    # Log every photo message
+    runtime.log_message(
+        chat_id,
+        content=agent_input,
+        sender_id=sender_id,
+        created_at=message.date,
+        metadata={
+            "telegram_message_id": message.id,
+            "caption": caption or "",
+        },
+    )
+
+    # Decide whether to respond: mention in caption or reply to bot
+    # Ensure bot identity cached
+    bot_id, bot_username = await _ensure_bot_identity(context)
+    trigger = False
+    if caption:
+        c = caption.lower()
+        if bot_username and f"@{bot_username.lower()}" in c:
+            trigger = True
+    if (not trigger) and message.reply_to_message and message.reply_to_message.from_user:
+        trigger = message.reply_to_message.from_user.id == bot_id
+
+    if not trigger:
+        return
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
     placeholder = await message.reply_text("Analyzing image...")
 
     try:
         LOGGER.info("Running vision agent with input:\n%s", agent_input)
-        response = await runtime.run_message(chat_id, agent_input, sender_id=sender_id)
+        response = await runtime.run_message(chat_id, agent_input, sender_id=sender_id, log_user=False)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Agent vision run failed")
         await placeholder.edit_text(f"Agent error: {exc}")
@@ -173,6 +240,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    # Log every text message first
+    runtime.log_message(
+        chat_id,
+        content=user_text,
+        sender_id=sender_id,
+        created_at=message.date,
+        metadata={
+            "telegram_message_id": message.id,
+            "reply_to_message_id": getattr(message.reply_to_message, "id", None),
+        },
+    )
+
+    # Decide whether to respond (mention or reply-to-bot)
+    bot_id, bot_username = await _ensure_bot_identity(context)
+    lowered = user_text.lower()
+    mentioned = bool(bot_username and f"@{bot_username.lower()}" in lowered)
+    replied_to_bot = bool(
+        message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot_id
+    )
+
+    if not (mentioned or replied_to_bot):
+        return
+
     progress_enabled = bool(context.chat_data.get("progress_enabled", False))
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
@@ -180,7 +270,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not progress_enabled:
         try:
-            response = await runtime.run_message(chat_id, user_text, sender_id=sender_id)
+            response = await runtime.run_message(chat_id, user_text, sender_id=sender_id, log_user=False)
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Agent run failed")
             await placeholder.edit_text(f"Agent error: {exc}")
@@ -323,7 +413,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         try:
-            response = await runtime.run_message_with_progress(chat_id, user_text, dispatcher, enable_progress=True, sender_id=sender_id)
+            response = await runtime.run_message_with_progress(
+                chat_id,
+                user_text,
+                dispatcher,
+                enable_progress=True,
+                sender_id=sender_id,
+                log_user=False,
+            )
         except Exception as exc:  # noqa: BLE001
             if error_text is None:
                 error_text = str(exc)
@@ -402,6 +499,18 @@ __all__ = [
     "shutdown",
 ]
 
+
+async def _ensure_bot_identity(context: ContextTypes.DEFAULT_TYPE) -> tuple[int | None, str | None]:
+    bot_id = context.application.bot_data.get(BOT_ID_KEY)
+    bot_username = context.application.bot_data.get(BOT_USERNAME_KEY)
+    if bot_id is not None and bot_username is not None:
+        return bot_id, bot_username
+    me = await context.bot.get_me()
+    bot_id = me.id
+    bot_username = me.username or ""
+    context.application.bot_data[BOT_ID_KEY] = bot_id
+    context.application.bot_data[BOT_USERNAME_KEY] = bot_username
+    return bot_id, bot_username
 
 
 
