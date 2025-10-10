@@ -2,3 +2,4 @@ start - Start interacting with Agent Mushroom
 help - Show available commands
 reset - Clear conversation memory
 progress - Toggle live progress updates
+recap - Summarize last 1h/1d of this chat

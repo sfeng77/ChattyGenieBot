@@ -1,11 +1,12 @@
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any, Awaitable, Callable, List, Set
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.agent_runtime import AgentRuntime
 from app.config import Settings
@@ -101,7 +102,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         created_at=message.date,
         metadata={"telegram_message_id": message.id},
     )
-    await message.reply_text("Commands:\n/start - welcome message\n/reset - clear conversation memory\n/progress - toggle live progress updates for this chat")
+    await message.reply_text(
+        "Commands:\n"
+        "/start - welcome message\n"
+        "/reset - clear conversation memory\n"
+        "/progress - toggle live progress updates for this chat\n"
+        "/recap - summarize last 1h/1d of this chat"
+    )
 
 
 @require_authorized
@@ -217,6 +224,118 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         LOGGER.exception("Failed to edit vision placeholder", exc_info=True)
         await message.reply_text(final_text)
 
+
+def _recap_window(period: str) -> tuple[str, datetime]:
+    p = (period or "").strip().lower()
+    if p == "1h":
+        return "the last 1 hour", datetime.now(timezone.utc) - timedelta(hours=1)
+    if p == "1d":
+        return "the last 1 day", datetime.now(timezone.utc) - timedelta(days=1)
+    raise ValueError("unsupported period")
+
+
+@require_authorized
+async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    LOGGER.info("/recap invoked by chat_id=%s", message.chat_id)
+    # Log the command
+    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    from_user = message.from_user
+    runtime.log_message(
+        message.chat_id,
+        content=message.text or "/recap",
+        sender_id=str(from_user.id) if from_user and from_user.id is not None else None,
+        created_at=message.date,
+        metadata={"telegram_message_id": message.id},
+    )
+
+    text = (message.text or "").strip()
+    parts = text.split()
+    period: str | None = parts[1].lower() if len(parts) >= 2 else None
+
+    if period not in {"1h", "1d"}:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("1 hour", callback_data="recap:1h"),
+                    InlineKeyboardButton("1 day", callback_data="recap:1d"),
+                ]
+            ]
+        )
+        await message.reply_text("Choose recap period:", reply_markup=keyboard)
+        return
+
+    try:
+        label, start = _recap_window(period)
+    except ValueError:
+        await message.reply_text("Unsupported period. Use 1h or 1d.")
+        return
+
+    await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
+    placeholder = await message.reply_text(f"Summarizing {label}...")
+
+    try:
+        summary = await runtime.recap_history(message.chat_id, start=start)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Recap generation failed")
+        await placeholder.edit_text(f"Recap error: {exc}")
+        return
+
+    if not summary:
+        final_text = f"No messages in {label}."
+    else:
+        final_text = f"Recap ({label}):\n\n{summary}"
+
+    try:
+        await placeholder.edit_text(final_text)
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("Failed to edit recap message", exc_info=True)
+        await message.reply_text(final_text)
+
+
+@require_authorized
+async def handle_recap_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    data = (query.data or "").strip()
+    if not data.startswith("recap:"):
+        await query.answer()
+        return
+    period = data.split(":", 1)[1]
+    try:
+        label, start = _recap_window(period)
+    except ValueError:
+        await query.answer(text="Unsupported period", show_alert=False)
+        return
+
+    await query.answer()
+    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    # Log the action similar to command
+    try:
+        runtime.log_message(
+            query.message.chat_id,
+            content=f"/recap {period}",
+            sender_id=str(getattr(update.effective_user, "id", "")) or None,
+        )
+    except Exception:
+        LOGGER.exception("Failed to log recap callback", exc_info=True)
+
+    await context.bot.send_chat_action(chat_id=query.message.chat_id, action=ChatAction.TYPING)
+    try:
+        summary = await runtime.recap_history(query.message.chat_id, start=start)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Recap generation failed")
+        await query.message.reply_text(f"Recap error: {exc}")
+        return
+
+    if not summary:
+        text = f"No messages in {label}."
+    else:
+        text = f"Recap ({label}):\n\n{summary}"
+    await query.message.reply_text(text)
 
 
 @require_authorized
@@ -481,6 +600,8 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("progress", toggle_progress))
+    application.add_handler(CommandHandler("recap", recap_command))
+    application.add_handler(CallbackQueryHandler(handle_recap_callback, pattern=r"^recap:(1h|1d)$"))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
 
@@ -511,6 +632,5 @@ async def _ensure_bot_identity(context: ContextTypes.DEFAULT_TYPE) -> tuple[int 
     context.application.bot_data[BOT_ID_KEY] = bot_id
     context.application.bot_data[BOT_USERNAME_KEY] = bot_username
     return bot_id, bot_username
-
 
 

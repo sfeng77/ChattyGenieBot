@@ -333,10 +333,17 @@ class AgentRuntime:
     ) -> str:
         max_chars = max_chars or self._settings.history_summary_max_chars
         messages = self.get_history_messages(chat_id, start=start, end=end)
+        LOGGER.info("Recap fetched %d history messages", len(messages))
         if not messages:
             return ""
-        transcript = self._messages_to_transcript(messages, max_chars * 4)
-        summary = await self._summarize_transcript(transcript, max_chars=max_chars)
+        # Use configurable transcript size for recap to include more context
+        transcript_limit = int(getattr(self._settings, "history_recap_transcript_chars", max_chars * 4))
+        if transcript_limit < 1000:
+            transcript_limit = 1000
+        transcript = self._messages_to_transcript(messages, transcript_limit)
+        LOGGER.info("Recap transcript length: %d chars", len(transcript))
+        LOGGER.info("Transcript preview: %s", transcript[:200].replace('\n', ' '))
+        summary = await self._summarize_recap(transcript, max_chars=max_chars)
         if summary:
             return summary
         return self._fallback_summary(transcript, max_chars)
@@ -454,21 +461,41 @@ class AgentRuntime:
             return transcript[-max_chars:]
         return transcript
 
-    async def _summarize_transcript(self, transcript: str, max_chars: int) -> str:
+    async def _summarize_core(self, transcript: str, max_chars: int, *, style: str = "generic") -> str:
         if not transcript:
             return ""
+        instructions = (
+            "You are a concise summarizer. Summarize chat conversations into a factual, neutral summary. "
+            "Focus on key questions, decisions, facts, and follow-ups. Prefer bullet points when helpful. "
+            "Avoid speculation. Keep within the requested character limit."
+        )
         summarizer = Agent(
             name="Summarizer",
-            instructions=("You are a concise summarizer. Summarize the prior conversation into a factual, neutral summary. Focus on key questions, decisions, facts, and follow-ups. Avoid speculation. Keep the summary under the requested character limit."),
+            instructions=instructions,
             model=self._settings.openai_model,
             model_settings=ModelSettings(temperature=0.1),
             tools=[],
         )
+        if style == "recap":
+            body = (
+                "Using the following transcript, create a concise recap that highlights:\n"
+                "- Main topics or themes\n"
+                "- Decisions or conclusions\n"
+                "Keep the recap brief and formatted as bullet points when appropriate.\n"
+                "Use the language of the original discussions.\n\n"
+                "Transcript:\n"
+                f"{transcript}\n"
+                "Recap:"
+            )
+        else:
+            body = (
+                "Conversation:\n"
+                f"{transcript}"
+            )
         prompt = (
             f"Character limit: {max_chars}.\n"
             "Return only the summary text (no preface).\n\n"
-            "Conversation:\n"
-            f"{transcript}"
+            f"{body}"
         )
         try:
             result = await Runner.run(summarizer, prompt, session=None, max_turns=1)
@@ -481,6 +508,12 @@ class AgentRuntime:
         if len(summary) > max_chars:
             summary = summary[: max(0, max_chars - 3)].rstrip() + "..."
         return summary
+
+    async def _summarize_transcript(self, transcript: str, max_chars: int) -> str:
+        return await self._summarize_core(transcript, max_chars, style="generic")
+
+    async def _summarize_recap(self, transcript: str, max_chars: int) -> str:
+        return await self._summarize_core(transcript, max_chars, style="recap")
 
     def _fallback_summary(self, transcript: str, max_chars: int) -> str:
         if not transcript:

@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     history_prune_threshold_items: int = Field(60, alias="HISTORY_PRUNE_THRESHOLD_ITEMS")
     history_keep_last_items: int = Field(12, alias="HISTORY_KEEP_LAST_ITEMS")
     history_summary_max_chars: int = Field(800, alias="HISTORY_SUMMARY_MAX_CHARS")
+    # Maximum characters of raw history to feed into recap transcript
+    history_recap_transcript_chars: int = Field(8000, alias="HISTORY_RECAP_TRANSCRIPT_CHARS")
     whitelisted_user_ids: str | None = Field(None, alias="WHITELISTED_USER_IDS")
     sessions_db_path: Path = Field(Path("data") / "sessions" / "sessions.db", alias="SESSIONS_DB_PATH")
     chat_history_db_path: Path = Field(Path("data") / "history" / "chat_history.db", alias="CHAT_HISTORY_DB_PATH")
