@@ -5,7 +5,7 @@ from functools import wraps
 from typing import Any, Awaitable, Callable, List, Set
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatAction
+from telegram.constants import ChatAction, ChatType
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.agent_runtime import AgentRuntime
@@ -192,10 +192,17 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         },
     )
 
-    # Decide whether to respond: mention in caption or reply to bot
+    # Decide whether to respond: always in 1-1 chats; otherwise mention in caption or reply to bot
     # Ensure bot identity cached
     bot_id, bot_username = await _ensure_bot_identity(context)
     trigger = False
+    # Auto-trigger in direct (non-group) chats
+    try:
+        if message.chat and message.chat.type == ChatType.PRIVATE:
+            trigger = True
+    except Exception:
+        # Be conservative if chat type missing/invalid
+        trigger = False
     if caption:
         c = caption.lower()
         if bot_username and f"@{bot_username.lower()}" in c:
@@ -371,7 +378,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         },
     )
 
-    # Decide whether to respond (mention or reply-to-bot)
+    # Decide whether to respond
+    # - Always respond in direct (1-1) chats
+    # - In group chats, require mention or reply-to-bot
     bot_id, bot_username = await _ensure_bot_identity(context)
     lowered = user_text.lower()
     mentioned = bool(bot_username and f"@{bot_username.lower()}" in lowered)
@@ -379,7 +388,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot_id
     )
 
-    if not (mentioned or replied_to_bot):
+    # Auto-trigger in private chats
+    is_private_chat = False
+    try:
+        is_private_chat = bool(message.chat and message.chat.type == ChatType.PRIVATE)
+    except Exception:
+        is_private_chat = False
+
+    if not (is_private_chat or mentioned or replied_to_bot):
         return
 
     progress_enabled = bool(context.chat_data.get("progress_enabled", False))
@@ -632,5 +648,4 @@ async def _ensure_bot_identity(context: ContextTypes.DEFAULT_TYPE) -> tuple[int 
     context.application.bot_data[BOT_ID_KEY] = bot_id
     context.application.bot_data[BOT_USERNAME_KEY] = bot_username
     return bot_id, bot_username
-
 
