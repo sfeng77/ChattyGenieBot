@@ -1,15 +1,20 @@
+import asyncio
 import logging
+import shutil
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from pathlib import Path
 from typing import Any, Awaitable, Callable, List, Set
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update, User, Voice
 from telegram.constants import ChatAction, ChatType
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.agent_runtime import AgentRuntime
 from app.config import Settings
+from app.asr import ASRService, TranscriptionResult, create_asr_service
 from app.progress import ProgressDispatcher, ProgressEvent
 
 LOGGER = logging.getLogger(__name__)
@@ -23,8 +28,25 @@ AGENT_RUNTIME_KEY = "agent_runtime"
 WHITELIST_KEY = "whitelist_user_ids"
 BOT_ID_KEY = "bot_id"
 BOT_USERNAME_KEY = "bot_username"
+ASR_SERVICE_KEY = "asr_service"
+FFMPEG_PATH_KEY = "ffmpeg_path"
 
 HandlerFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
+
+
+def _resolve_ffmpeg_path(candidate: str | None) -> str | None:
+    if not candidate:
+        return None
+    candidate = candidate.strip()
+    if not candidate:
+        return None
+    path = Path(candidate)
+    if path.is_file():
+        return str(path)
+    resolved = shutil.which(candidate)
+    if resolved:
+        return resolved
+    return None
 
 
 def _truncate(text: str, limit: int = 160) -> str:
@@ -346,6 +368,117 @@ async def handle_recap_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 @require_authorized
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None or not message.voice:
+        return
+
+    settings: Settings = context.application.bot_data[SETTINGS_KEY]
+    if not settings.asr_enabled:
+        await message.reply_text("Voice transcription is disabled for this deployment.")
+        return
+
+    asr_service: ASRService | None = context.application.bot_data.get(ASR_SERVICE_KEY)
+    if asr_service is None:
+        await message.reply_text("Voice transcription service is unavailable.")
+        return
+
+    ffmpeg_path: str | None = context.application.bot_data.get(FFMPEG_PATH_KEY)
+    if not ffmpeg_path:
+        await message.reply_text("Cannot transcribe audio because ffmpeg is not available on the server.")
+        return
+
+    voice = message.voice
+    duration = int(getattr(voice, "duration", 0) or 0)
+    if settings.max_audio_duration_s > 0 and duration > settings.max_audio_duration_s:
+        await message.reply_text(
+            f"Voice note too long ({duration}s). Limit is {settings.max_audio_duration_s} seconds."
+        )
+        return
+
+    file_size = int(getattr(voice, "file_size", 0) or 0)
+    if settings.max_audio_size_mb > 0:
+        max_bytes = settings.max_audio_size_mb * 1024 * 1024
+        if file_size and file_size > max_bytes:
+            size_mb = file_size / (1024 * 1024)
+            await message.reply_text(
+                f"Voice note too large ({size_mb:.1f} MB). Limit is {settings.max_audio_size_mb} MB."
+            )
+            return
+
+    placeholder = await message.reply_text("Transcribing...")
+
+    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    from_user = message.from_user
+    sender_id: str | None = str(from_user.id) if from_user and from_user.id is not None else None
+
+    try:
+        transcription = await _transcribe_voice_note(voice, ffmpeg_path, asr_service)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Voice transcription failed")
+        try:
+            await placeholder.edit_text(f"Transcription failed: {exc}")
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to edit transcription failure message", exc_info=True)
+            await message.reply_text(f"Transcription failed: {exc}")
+        return
+
+    transcript_text = (transcription.text or "").strip()
+    has_transcript = bool(transcript_text)
+    if not has_transcript:
+        transcript_text = "(no speech detected)"
+
+    display_name = _format_user_display_name(from_user)
+    display_text = f"[{display_name}] 说: {transcript_text}"
+
+    if settings.transcribe_echo_enabled:
+        try:
+            await placeholder.edit_text(display_text)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to edit transcription placeholder", exc_info=True)
+            await message.reply_text(display_text)
+    else:
+        try:
+            await context.bot.delete_message(chat_id=message.chat_id, message_id=placeholder.message_id)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("Failed to delete transcription placeholder", exc_info=True)
+
+    metadata: dict[str, Any] = {
+        "telegram_message_id": message.id,
+        "voice_file_id": voice.file_id,
+        "voice_mime_type": voice.mime_type,
+        "voice_duration": duration,
+        "voice_file_size": file_size,
+        "asr_language": transcription.language,
+        "asr_duration": transcription.duration,
+        "asr_status": "ok" if has_transcript else "empty",
+    }
+    if transcription.segments:
+        metadata["asr_segments_preview"] = [
+            {"start": segment.start, "end": segment.end, "text": segment.text}
+            for segment in transcription.segments[:5]
+        ]
+
+    runtime.log_message(
+        message.chat_id,
+        content=transcript_text,
+        sender_id=sender_id,
+        created_at=message.date,
+        metadata=metadata,
+    )
+
+    bot_id, _ = await _ensure_bot_identity(context)
+    reply_to_bot = bool(
+        message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot_id
+    )
+
+    if not (reply_to_bot and has_transcript):
+        return
+
+    await _run_agent_turn(message, context, runtime, settings, transcript_text, sender_id)
+
+
+@require_authorized
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None or not message.text:
@@ -398,14 +531,91 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not (is_private_chat or mentioned or replied_to_bot):
         return
 
+    await _run_agent_turn(message, context, runtime, settings, user_text, sender_id)
+
+
+
+def _parse_whitelist(raw: str | None) -> Set[int]:
+    if not raw:
+        return set()
+    items = set()
+    for piece in raw.split(','):
+        candidate = piece.strip()
+        if not candidate:
+            continue
+        try:
+            items.add(int(candidate))
+        except ValueError:
+            LOGGER.warning("Ignoring invalid telegram user id in whitelist: %s", candidate)
+    return items
+
+
+async def _convert_audio_to_wav(ffmpeg_path: str, source: Path, target: Path) -> None:
+    process = await asyncio.create_subprocess_exec(
+        ffmpeg_path,
+        "-y",
+        "-i",
+        str(source),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        str(target),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await process.communicate()
+    if process.returncode != 0:
+        stderr_text = (stderr.decode("utf-8", errors="ignore") or "").strip()
+        raise RuntimeError(f"ffmpeg failed with exit code {process.returncode}: {stderr_text}")
+    if not target.exists():
+        raise RuntimeError("ffmpeg did not produce an output file.")
+
+
+async def _transcribe_voice_note(voice: Voice, ffmpeg_path: str, asr_service: ASRService) -> TranscriptionResult:
+    telegram_file = await voice.get_file()
+    with tempfile.TemporaryDirectory(prefix="cg-voice-") as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        source_path = temp_dir_path / "input"
+        target_path = temp_dir_path / "converted.wav"
+        await telegram_file.download_to_drive(custom_path=str(source_path))
+        await _convert_audio_to_wav(ffmpeg_path, source_path, target_path)
+        result = await asyncio.to_thread(asr_service.transcribe, str(target_path))
+    return result
+
+
+def _format_user_display_name(user: User | None) -> str:
+    if user is None:
+        return "user"
+    if user.username:
+        return user.username
+    full_name = (user.full_name or "").strip()
+    if full_name:
+        return full_name
+    parts = [p for p in [user.first_name, user.last_name] if p]
+    if parts:
+        return " ".join(parts)
+    if user.id:
+        return str(user.id)
+    return "user"
+
+
+async def _run_agent_turn(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    runtime: AgentRuntime,
+    settings: Settings,
+    user_text: str,
+    sender_id: str | None,
+) -> None:
     progress_enabled = bool(context.chat_data.get("progress_enabled", False))
 
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
     placeholder = await message.reply_text("Thinking...")
 
     if not progress_enabled:
         try:
-            response = await runtime.run_message(chat_id, user_text, sender_id=sender_id, log_user=False)
+            response = await runtime.run_message(message.chat_id, user_text, sender_id=sender_id, log_user=False)
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Agent run failed")
             await placeholder.edit_text(f"Agent error: {exc}")
@@ -435,7 +645,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     timeline: List[str] = [_timeline_line({"elapsed_seconds": 0.0}, "[user]", _truncate(user_text, 200))]
 
     def _trim_timeline() -> None:
-        # Keep only the most recent progress entries to avoid hitting Telegram limits
         while len(timeline) > MAX_PROGRESS_LINES:
             if len(timeline) <= 1:
                 break
@@ -549,7 +758,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         try:
             response = await runtime.run_message_with_progress(
-                chat_id,
+                message.chat_id,
                 user_text,
                 dispatcher,
                 enable_progress=True,
@@ -581,25 +790,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await message.reply_text(final_plain)
     if not keep_timeline:
         try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=placeholder.message_id)
+            await context.bot.delete_message(chat_id=message.chat_id, message_id=placeholder.message_id)
         except Exception:  # noqa: BLE001
             LOGGER.exception("Failed to delete progress message", exc_info=True)
-
-
-
-def _parse_whitelist(raw: str | None) -> Set[int]:
-    if not raw:
-        return set()
-    items = set()
-    for piece in raw.split(','):
-        candidate = piece.strip()
-        if not candidate:
-            continue
-        try:
-            items.add(int(candidate))
-        except ValueError:
-            LOGGER.warning("Ignoring invalid telegram user id in whitelist: %s", candidate)
-    return items
 
 
 
@@ -607,10 +800,41 @@ def build_application(settings: Settings) -> Application:
     LOGGER.info("Building application with model=%s", settings.openai_model)
     runtime = AgentRuntime(settings)
 
+    asr_service: ASRService | None = None
+    if settings.asr_enabled:
+        try:
+            asr_service = create_asr_service(
+                backend=settings.asr_backend,
+                model=settings.asr_model,
+                device=settings.asr_device,
+                compute_type=settings.asr_compute_type,
+                beam_size=settings.asr_beam_size,
+                vad_filter=settings.asr_vad_filter,
+                condition_on_previous_text=settings.asr_condition_on_previous_text,
+            )
+            LOGGER.info(
+                "Initialized ASR backend=%s model=%s device=%s compute_type=%s",
+                settings.asr_backend,
+                settings.asr_model,
+                settings.asr_device,
+                settings.asr_compute_type,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to initialize ASR service")
+            asr_service = None
+    else:
+        LOGGER.info("ASR disabled by configuration")
+
+    ffmpeg_path_resolved = _resolve_ffmpeg_path(settings.ffmpeg_path)
+    if settings.asr_enabled and not ffmpeg_path_resolved:
+        LOGGER.warning("ASR is enabled but ffmpeg was not found at %s", settings.ffmpeg_path)
+
     application = Application.builder().token(settings.telegram_bot_token).build()
     application.bot_data[SETTINGS_KEY] = settings
     application.bot_data[AGENT_RUNTIME_KEY] = runtime
     application.bot_data[WHITELIST_KEY] = _parse_whitelist(settings.whitelisted_user_ids)
+    application.bot_data[ASR_SERVICE_KEY] = asr_service
+    application.bot_data[FFMPEG_PATH_KEY] = ffmpeg_path_resolved
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
@@ -618,6 +842,7 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("progress", toggle_progress))
     application.add_handler(CommandHandler("recap", recap_command))
     application.add_handler(CallbackQueryHandler(handle_recap_callback, pattern=r"^recap:(1h|1d)$"))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
 
@@ -648,4 +873,3 @@ async def _ensure_bot_identity(context: ContextTypes.DEFAULT_TYPE) -> tuple[int 
     context.application.bot_data[BOT_ID_KEY] = bot_id
     context.application.bot_data[BOT_USERNAME_KEY] = bot_username
     return bot_id, bot_username
-

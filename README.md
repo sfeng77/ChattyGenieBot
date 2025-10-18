@@ -54,6 +54,18 @@ VISION_TEMPERATURE=0.2
 VISION_TIMEOUT=20
 VISION_MAX_EDGE=1280
 VISION_SYSTEM_PROMPT=You are a concise vision assistant. Focus on factual observations and answer user questions about the image.
+ASR_ENABLED=true
+ASR_BACKEND=faster_whisper
+ASR_MODEL=large-v3
+ASR_DEVICE=cuda
+ASR_COMPUTE_TYPE=float16
+ASR_BEAM_SIZE=1
+ASR_VAD_FILTER=true
+ASR_CONDITION_ON_PREVIOUS_TEXT=false
+FFMPEG_PATH=ffmpeg
+MAX_AUDIO_DURATION_SECONDS=45
+MAX_AUDIO_SIZE_MB=20
+TRANSCRIBE_ECHO_ENABLED=true
 ```
 
 `OPENAI_API_BASE` defaults to the local Ollama OpenAI-compatible endpoint. Set `WEB_SEARCH_ENABLED=true` to expose the `web_search` tool; the Ollama API key is required and is sent as `Authorization: Bearer <OLLAMA_API_KEY>`.
@@ -73,6 +85,12 @@ Commands:
 - `/help` - command reference
 - `/reset` - clear the conversation memory for the current chat
 - `/progress` - toggle live progress updates
+
+## Voice input
+- Telegram voice notes are transcribed locally with faster-whisper (default `large-v3` on CUDA) and echoed back as `[username] 说: ...`.
+- The agent is only invoked when the voice note replies to a previous bot message; otherwise the transcript is logged without a model turn.
+- Install [ffmpeg](https://ffmpeg.org/download.html) and ensure it is on `PATH`, or point `FFMPEG_PATH` at the executable.
+- Downloaded models are cached by faster-whisper; the first run will pull weights into your home cache directory.
 
 ## Chat history helpers
 - `AgentRuntime.search_history(chat_id, query, limit=50)` returns keyword matches with snippets.

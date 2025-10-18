@@ -40,6 +40,18 @@ class Settings(BaseSettings):
         "You are a concise vision assistant. Focus on factual observations and answer user questions about the image.",
         alias="VISION_SYSTEM_PROMPT",
     )
+    asr_enabled: bool = Field(True, alias="ASR_ENABLED")
+    asr_backend: str = Field("faster_whisper", alias="ASR_BACKEND")
+    asr_model: str = Field("large-v3", alias="ASR_MODEL")
+    asr_device: str = Field("cuda", alias="ASR_DEVICE")
+    asr_compute_type: str = Field("float16", alias="ASR_COMPUTE_TYPE")
+    asr_beam_size: int = Field(1, alias="ASR_BEAM_SIZE")
+    asr_vad_filter: bool = Field(True, alias="ASR_VAD_FILTER")
+    asr_condition_on_previous_text: bool = Field(False, alias="ASR_CONDITION_ON_PREVIOUS_TEXT")
+    ffmpeg_path: str = Field("ffmpeg", alias="FFMPEG_PATH")
+    max_audio_duration_s: int = Field(45, alias="MAX_AUDIO_DURATION_SECONDS")
+    max_audio_size_mb: int = Field(20, alias="MAX_AUDIO_SIZE_MB")
+    transcribe_echo_enabled: bool = Field(True, alias="TRANSCRIBE_ECHO_ENABLED")
     max_input_chars: int = Field(4000, alias="MAX_INPUT_CHARS")
     progress_edit_throttle_ms: int = Field(800, alias="PROGRESS_EDIT_THROTTLE_MS")
     progress_keep_timeline: bool = Field(False, alias="PROGRESS_KEEP_TIMELINE")
