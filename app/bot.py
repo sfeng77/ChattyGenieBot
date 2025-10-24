@@ -34,6 +34,46 @@ FFMPEG_PATH_KEY = "ffmpeg_path"
 HandlerFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
 
+async def _should_respond(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    mention_text: str | None = None,
+    *,
+    require_reply: bool = False,
+    
+) -> bool:
+    """Decide whether the bot should respond in this context.
+
+    Preserves existing behavior across handlers:
+    - respond in private chats, or when mentioned, or when replied to.
+    """
+    # Determine chat type safely
+    is_private_chat = False
+    try:
+        is_private_chat = bool(message.chat and message.chat.type == ChatType.PRIVATE)
+    except Exception:
+        is_private_chat = False
+
+    bot_id, bot_username = await _ensure_bot_identity(context)
+
+    replied_to_bot = bool(
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and message.reply_to_message.from_user.id == bot_id
+    )
+
+    if require_reply:
+        return replied_to_bot
+
+    mentioned = False
+    if mention_text:
+        lowered = mention_text.lower()
+        if bot_username:
+            mentioned = f"@{bot_username.lower()}" in lowered
+
+    return bool(is_private_chat or mentioned or replied_to_bot)
+
+
 def _resolve_ffmpeg_path(candidate: str | None) -> str | None:
     if not candidate:
         return None
@@ -214,25 +254,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         },
     )
 
-    # Decide whether to respond: always in 1-1 chats; otherwise mention in caption or reply to bot
-    # Ensure bot identity cached
-    bot_id, bot_username = await _ensure_bot_identity(context)
-    trigger = False
-    # Auto-trigger in direct (non-group) chats
-    try:
-        if message.chat and message.chat.type == ChatType.PRIVATE:
-            trigger = True
-    except Exception:
-        # Be conservative if chat type missing/invalid
-        trigger = False
-    if caption:
-        c = caption.lower()
-        if bot_username and f"@{bot_username.lower()}" in c:
-            trigger = True
-    if (not trigger) and message.reply_to_message and message.reply_to_message.from_user:
-        trigger = message.reply_to_message.from_user.id == bot_id
-
-    if not trigger:
+    # Decide whether to respond
+    if not await _should_respond(message, context, mention_text=caption):
         return
 
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
@@ -467,11 +490,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         metadata=metadata,
     )
 
-    bot_id, _ = await _ensure_bot_identity(context)
-    reply_to_bot = bool(
-        message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot_id
-    )
-
+    # For voice, preserve behavior: only respond when replying to the bot
+    reply_to_bot = await _should_respond(message, context, require_reply=True)
     if not (reply_to_bot and has_transcript):
         return
 
@@ -511,24 +531,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         },
     )
 
-    # Decide whether to respond
-    # - Always respond in direct (1-1) chats
-    # - In group chats, require mention or reply-to-bot
-    bot_id, bot_username = await _ensure_bot_identity(context)
-    lowered = user_text.lower()
-    mentioned = bool(bot_username and f"@{bot_username.lower()}" in lowered)
-    replied_to_bot = bool(
-        message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot_id
-    )
-
-    # Auto-trigger in private chats
-    is_private_chat = False
-    try:
-        is_private_chat = bool(message.chat and message.chat.type == ChatType.PRIVATE)
-    except Exception:
-        is_private_chat = False
-
-    if not (is_private_chat or mentioned or replied_to_bot):
+    # Decide whether to respond (private, mention, or reply)
+    if not await _should_respond(message, context, mention_text=user_text):
         return
 
     await _run_agent_turn(message, context, runtime, settings, user_text, sender_id)
