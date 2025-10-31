@@ -1,16 +1,18 @@
 import asyncio
 import logging
+import re
 import shutil
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Awaitable, Callable, List, Set
+from typing import Any, Awaitable, Callable, List, Sequence, Set
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update, User, Voice
-from telegram.constants import ChatAction, ChatType
+from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.error import BadRequest
 
 from app.agent_runtime import AgentRuntime
 from app.config import Settings
@@ -94,6 +96,81 @@ def _truncate(text: str, limit: int = 160) -> str:
     if len(text) <= limit:
         return text
     return f"{text[: limit - 3]}..."
+
+
+def _escape_markdown_url(url: str) -> str:
+    """Escape characters in URLs that break Telegram Markdown parsing."""
+    return (
+        url.replace("\\", "")
+        .replace(")", r"\)")
+        .replace("(", r"\(")
+        .replace("_", r"\_")
+    )
+
+
+_BOLD_PATTERN = re.compile(r"\*\*(.+?)\*\*")
+_DOUBLE_UNDERSCORE_PATTERN = re.compile(r"__(.+?)__")
+
+
+def _normalize_markdown_for_telegram(text: str) -> str:
+    """Convert common Markdown to Telegram legacy Markdown-compatible form."""
+    def replace_bold(match: re.Match[str]) -> str:
+        return f"*{match.group(1)}*"
+
+    text = _BOLD_PATTERN.sub(replace_bold, text)
+    text = _DOUBLE_UNDERSCORE_PATTERN.sub(r"_\1_", text)
+    return text
+
+
+def _prepare_agent_message(text: str, citations: Sequence[str] | None = None) -> str:
+    """Append missing citations and normalize formatting for Telegram Markdown."""
+    message = text.strip()
+    unique_urls: list[str] = []
+    if citations:
+        for url in citations:
+            clean = (url or "").strip()
+            if not clean or clean in unique_urls:
+                continue
+            unique_urls.append(clean)
+    if unique_urls:
+        missing: list[tuple[int, str]] = []
+        for idx, url in enumerate(unique_urls, start=1):
+            marker = f"[{idx}]("
+            if marker not in message:
+                missing.append((idx, url))
+        if missing:
+            footer_line = ", ".join(f"[{idx}]({_escape_markdown_url(url)})" for idx, url in missing)
+            message = f"{message.rstrip()}\n\nSources / 来源: {footer_line}"
+    return _normalize_markdown_for_telegram(message)
+
+
+def _is_markdown_parse_error(exc: Exception) -> bool:
+    lowered = str(exc).lower()
+    return "markdown" in lowered or "parse" in lowered
+
+
+async def _send_markdown_with_fallback(
+    send_func: Callable[..., Awaitable[Any]],
+    text: str,
+    *,
+    raw_text: str | None = None,
+    disable_preview: bool = False,
+    **kwargs: Any,
+) -> None:
+    fallback_text = raw_text if raw_text is not None else text
+    try:
+        await send_func(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=disable_preview,
+            **kwargs,
+        )
+    except BadRequest as exc:
+        if _is_markdown_parse_error(exc):
+            LOGGER.warning("Markdown parse failed, retrying without formatting: %s", exc)
+            await send_func(fallback_text, disable_web_page_preview=disable_preview, **kwargs)
+        else:
+            raise
 
 
 def _format_timeline(timeline: List[str]) -> str:
@@ -270,11 +347,26 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     final_text = (response or "").strip() or "I am sorry, I could not describe that image."
+    prepared_text = _prepare_agent_message(final_text, [])
     try:
-        await placeholder.edit_text(final_text)
+        await _send_markdown_with_fallback(
+            placeholder.edit_text,
+            prepared_text,
+            raw_text=final_text,
+            disable_preview=False,
+        )
     except Exception:  # noqa: BLE001
         LOGGER.exception("Failed to edit vision placeholder", exc_info=True)
-        await message.reply_text(final_text)
+        try:
+            await _send_markdown_with_fallback(
+                message.reply_text,
+                prepared_text,
+                raw_text=final_text,
+                disable_preview=False,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to send vision reply fallback", exc_info=True)
+            await message.reply_text(final_text)
 
 
 def _recap_window(period: str) -> tuple[str, datetime]:
@@ -617,27 +709,28 @@ async def _run_agent_turn(
     await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.TYPING)
     placeholder = await message.reply_text("Thinking...")
 
-    if not progress_enabled:
-        try:
-            response = await runtime.run_message(message.chat_id, user_text, sender_id=sender_id, log_user=False)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Agent run failed")
-            await placeholder.edit_text(f"Agent error: {exc}")
-            return
-        final_text = response.strip() or "I am sorry, I could not formulate a response."
-        try:
-            await placeholder.edit_text(final_text)
-        except Exception:  # noqa: BLE001
-            LOGGER.exception("Failed to edit message", exc_info=True)
-            await message.reply_text(final_text)
-        return
-
     dispatcher = ProgressDispatcher()
     throttle_seconds = max(settings.progress_edit_throttle_ms / 1000.0, 0.1)
     keep_timeline = settings.progress_keep_timeline
     last_edit = 0.0
     final_text: str | None = None
     error_text: str | None = None
+    citation_urls: List[str] = []
+
+    def _record_citations(meta: dict[str, Any]) -> None:
+        urls: List[str] = []
+        meta_urls = meta.get("results_urls")
+        if isinstance(meta_urls, (list, tuple)):
+            for candidate in meta_urls:
+                if isinstance(candidate, str):
+                    urls.append(candidate)
+        top_url = meta.get("top_url")
+        if isinstance(top_url, str):
+            urls.insert(0, top_url)
+        for url in urls:
+            clean = url.strip()
+            if clean and clean not in citation_urls:
+                citation_urls.append(clean)
 
     def _timeline_line(meta: dict[str, Any] | None, label: str, body: str) -> str:
         elapsed: str | None = None
@@ -646,17 +739,23 @@ async def _run_agent_turn(
         parts = [p for p in [elapsed, label, body] if p]
         return " | ".join(parts)
 
-    timeline: List[str] = [_timeline_line({"elapsed_seconds": 0.0}, "[user]", _truncate(user_text, 200))]
+    timeline: List[str] = []
+    if progress_enabled:
+        timeline.append(_timeline_line({"elapsed_seconds": 0.0}, "[user]", _truncate(user_text, 200)))
 
     def _trim_timeline() -> None:
+        if not progress_enabled:
+            return
         while len(timeline) > MAX_PROGRESS_LINES:
             if len(timeline) <= 1:
                 break
             timeline.pop(1)
-        while len('\n'.join(timeline)) > MAX_PROGRESS_CHARS and len(timeline) > 1:
+        while len("\n".join(timeline)) > MAX_PROGRESS_CHARS and len(timeline) > 1:
             timeline.pop(1)
 
     async def apply_edit(force: bool = False) -> None:
+        if not progress_enabled:
+            return
         nonlocal last_edit
         now = time.monotonic()
         if not force and (now - last_edit) < throttle_seconds:
@@ -674,9 +773,10 @@ async def _run_agent_turn(
         text = event.get("text") or ""
 
         if event_type == "turn_started":
-            timeline.append(_timeline_line(meta, "[agent]", "turn started"))
-            _trim_timeline()
-            await apply_edit(force=True)
+            if progress_enabled:
+                timeline.append(_timeline_line(meta, "[agent]", "turn started"))
+                _trim_timeline()
+                await apply_edit(force=True)
             return
         if event_type == "llm_started":
             preview = meta.get("prompt_preview")
@@ -685,31 +785,35 @@ async def _run_agent_turn(
                 LOGGER.info("Prompt preview: %s", _truncate(str(preview), 160))
             if system_prompt:
                 LOGGER.info("System prompt snapshot: %s", _truncate(str(system_prompt), 160))
-            timeline.append(_timeline_line(meta, "[model]", "model call started"))
-            _trim_timeline()
-            await apply_edit()
+            if progress_enabled:
+                timeline.append(_timeline_line(meta, "[model]", "model call started"))
+                _trim_timeline()
+                await apply_edit()
             return
         if event_type == "llm_finished":
             preview = meta.get("response_preview") or text
-            if preview:
+            if progress_enabled and preview:
                 timeline.append(_timeline_line(meta, "[model]", f"response: {_truncate(str(preview), 32)}"))
                 _trim_timeline()
                 await apply_edit()
             return
         if event_type == "tool_started":
             name = text or meta.get("tool") or "tool"
-            timeline.append(_timeline_line(meta, "[tool]", f"{name} started"))
-            _trim_timeline()
-            await apply_edit()
+            if progress_enabled:
+                timeline.append(_timeline_line(meta, "[tool]", f"{name} started"))
+                _trim_timeline()
+                await apply_edit()
             return
         if event_type == "tool_finished":
             name = text or meta.get("tool") or "tool"
+            if name == "web_search":
+                _record_citations(meta)
             if name == "web_search":
                 url = meta.get("top_url") or "(no url)"
                 summary_val = meta.get("summary") or ""
                 first_line = str(summary_val).splitlines()[0] if str(summary_val).splitlines() else ""
                 preview_line = _truncate(first_line, settings.progress_tool_result_max_chars)
-                body = f"url: {url} | {preview_line}".strip(' |')
+                body = f"url: {url} | {preview_line}".strip(" |")
             else:
                 summary = meta.get("summary")
                 count = meta.get("results_count")
@@ -722,16 +826,18 @@ async def _run_agent_turn(
                 if summary:
                     details.append(_truncate(str(summary), settings.progress_tool_result_max_chars))
                 body = "; ".join(details) if details else "finished"
-            timeline.append(_timeline_line(meta, "[tool]", f"{name} {body}"))
-            _trim_timeline()
-            await apply_edit()
+            if progress_enabled:
+                timeline.append(_timeline_line(meta, "[tool]", f"{name} {body}"))
+                _trim_timeline()
+                await apply_edit()
             return
         if event_type == "tool_error":
             name = text or meta.get("tool") or "tool"
             error_msg = meta.get("error") or text or "tool error"
-            timeline.append(_timeline_line(meta, "[tool-error]", f"{name}: {_truncate(str(error_msg), 160)}"))
-            _trim_timeline()
-            await apply_edit(force=True)
+            if progress_enabled:
+                timeline.append(_timeline_line(meta, "[tool-error]", f"{name}: {_truncate(str(error_msg), 160)}"))
+                _trim_timeline()
+                await apply_edit(force=True)
             return
         if event_type == "turn_failed":
             reason = (event.get("text") or "Agent run failed.").strip()
@@ -739,19 +845,20 @@ async def _run_agent_turn(
             if exc_type:
                 reason = f"{exc_type}: {reason}"
             error_text = reason
-            timeline.append(_timeline_line(meta, "[error]", reason))
-            _trim_timeline()
-            await apply_edit(force=True)
+            if progress_enabled:
+                timeline.append(_timeline_line(meta, "[error]", reason))
+                _trim_timeline()
+                await apply_edit(force=True)
             return
         if event_type == "turn_finished":
             final_text = (event.get("text") or "").strip()
-            if final_text:
+            if progress_enabled and final_text:
                 timeline.append(_timeline_line(meta, "[done]", "model responded with final answer"))
                 _trim_timeline()
                 await apply_edit()
             return
 
-        if text:
+        if progress_enabled and text:
             timeline.append(_timeline_line(meta, "[event]", _truncate(text, 160)))
             _trim_timeline()
             await apply_edit()
@@ -782,17 +889,36 @@ async def _run_agent_turn(
 
     final_plain = final_text or response or "I am sorry, I could not formulate a response."
     final_plain = final_plain.strip() or "I am sorry, I could not formulate a response."
+    prepared_plain = _prepare_agent_message(final_plain, citation_urls)
 
     try:
-        await message.reply_text(final_plain)
+        if progress_enabled:
+            await _send_markdown_with_fallback(
+                message.reply_text,
+                prepared_plain,
+                raw_text=final_plain,
+                disable_preview=False,
+            )
+        else:
+            await _send_markdown_with_fallback(
+                placeholder.edit_text,
+                prepared_plain,
+                raw_text=final_plain,
+                disable_preview=False,
+            )
     except Exception:  # noqa: BLE001
         LOGGER.exception("Failed to send final message", exc_info=True)
         try:
-            await placeholder.edit_text(final_plain)
+            await _send_markdown_with_fallback(
+                placeholder.edit_text,
+                prepared_plain,
+                raw_text=final_plain,
+                disable_preview=False,
+            )
         except Exception:  # noqa: BLE001
             LOGGER.exception("Fallback edit failed", exc_info=True)
             await message.reply_text(final_plain)
-    if not keep_timeline:
+    if progress_enabled and not keep_timeline:
         try:
             await context.bot.delete_message(chat_id=message.chat_id, message_id=placeholder.message_id)
         except Exception:  # noqa: BLE001

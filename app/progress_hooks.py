@@ -212,6 +212,8 @@ class ProgressHooks(RunHooks[TContext]):
         else:
             payload = decoded
 
+        urls: list[str] = []
+
         if isinstance(payload, dict):
             query = payload.get("query")
             if isinstance(query, str):
@@ -228,6 +230,13 @@ class ProgressHooks(RunHooks[TContext]):
                         top_url = first.get("url") or first.get("link")
                         if isinstance(top_url, str) and top_url.strip():
                             meta["top_url"] = top_url.strip()
+                    for item in results:
+                        if isinstance(item, dict):
+                            link = item.get("url") or item.get("link")
+                            if isinstance(link, str) and link.strip():
+                                cleaned_link = link.strip()
+                                if cleaned_link not in urls:
+                                    urls.append(cleaned_link)
                 snippet = _first_snippet(results)
                 if snippet:
                     summary_text = self._truncate(snippet)
@@ -240,6 +249,13 @@ class ProgressHooks(RunHooks[TContext]):
             snippet = _first_snippet(payload)
             if snippet:
                 summary_text = self._truncate(snippet)
+            for item in payload:
+                if isinstance(item, dict):
+                    link = item.get("url") or item.get("link")
+                    if isinstance(link, str) and link.strip():
+                        cleaned = link.strip()
+                        if cleaned not in urls:
+                            urls.append(cleaned)
         elif payload is not None and summary_text is None:
             summary_text = self._truncate(payload)
 
@@ -249,6 +265,8 @@ class ProgressHooks(RunHooks[TContext]):
             meta["error"] = error_text
         if summary_text:
             meta["summary"] = summary_text
+        if urls:
+            meta["results_urls"] = urls
 
         return {
             "type": event_type,
