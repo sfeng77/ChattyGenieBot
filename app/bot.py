@@ -244,9 +244,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await message.reply_text(
         "Commands:\n"
         "/start - welcome message\n"
+        "/help - command reference\n"
         "/reset - clear conversation memory\n"
         "/progress - toggle live progress updates for this chat\n"
-        "/recap - summarize last 1h/1d of this chat"
+        "/recap - summarize last 1h/1d of this chat\n"
+        "/learn - learn a user's writing style from recent chat history (reply to a user or run directly to learn your own style)"
     )
 
 
@@ -269,6 +271,163 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
     await runtime.reset(message.chat_id)
     await message.reply_text("Conversation memory cleared.")
+
+
+@require_authorized
+async def learn_style(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    LOGGER.info("/learn invoked by chat_id=%s", message.chat_id)
+    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    from_user = message.from_user
+    runtime.log_message(
+        message.chat_id,
+        content=message.text or "/learn",
+        sender_id=str(from_user.id) if from_user and from_user.id is not None else None,
+        created_at=message.date,
+        metadata={"telegram_message_id": message.id},
+    )
+    sender_ids = runtime.list_chat_senders(message.chat_id)
+    if not sender_ids:
+        await message.reply_text("No user messages found in this chat to learn from yet.")
+        return
+    preferred: list[str] = []
+    reply_user = message.reply_to_message.from_user if message.reply_to_message and message.reply_to_message.from_user else None
+    if reply_user and reply_user.id is not None:
+        preferred.append(str(reply_user.id))
+    if from_user and from_user.id is not None:
+        preferred.append(str(from_user.id))
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for sid in preferred:
+        if sid in sender_ids and sid not in seen:
+            ordered.append(sid)
+            seen.add(sid)
+    for sid in sender_ids:
+        if sid not in seen:
+            ordered.append(sid)
+            seen.add(sid)
+    rows: list[list[InlineKeyboardButton]] = []
+    for sid in ordered:
+        label = sid
+        try:
+            user_id_int = int(sid)
+        except ValueError:
+            user_id_int = None
+        if user_id_int is not None:
+            try:
+                member = await context.bot.get_chat_member(message.chat_id, user_id_int)
+                user_obj = member.user
+                label = user_obj.full_name or (user_obj.username or sid)
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to resolve user for sender_id=%s", sid, exc_info=True)
+        rows.append([InlineKeyboardButton(label, callback_data=f"learn:{sid}")])
+    rows.append([InlineKeyboardButton("Cancel", callback_data="learn:cancel")])
+    keyboard = InlineKeyboardMarkup(rows)
+    await message.reply_text("Select a user to learn style from:", reply_markup=keyboard)
+
+
+@require_authorized
+async def handle_learn_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    data = (query.data or "").strip()
+    if not data.startswith("learn:"):
+        await query.answer()
+        return
+    token = data.split(":", 1)[1]
+    if token == "cancel":
+        await query.answer(text="Cancelled.")
+        try:
+            await query.edit_message_text("Style learning cancelled.")
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to edit learn cancel message", exc_info=True)
+        return
+    sender_id = token
+    chat_id = query.message.chat_id
+    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
+    try:
+        runtime.log_message(
+            chat_id,
+            content=f"/learn {sender_id}",
+            sender_id=str(getattr(update.effective_user, "id", "")) or None,
+            metadata={"via": "learn_callback"},
+        )
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("Failed to log learn callback", exc_info=True)
+    await query.answer()
+    display_name = sender_id
+    user_id_int: int | None
+    try:
+        user_id_int = int(sender_id)
+    except ValueError:
+        user_id_int = None
+    if user_id_int is not None:
+        try:
+            member = await context.bot.get_chat_member(chat_id, user_id_int)
+            user_obj = member.user
+            display_name = user_obj.full_name or (user_obj.username or sender_id)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to resolve user for sender_id=%s", sender_id, exc_info=True)
+    try:
+        await query.edit_message_text(f"Learning writing style for {display_name}...")
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("Failed to edit learn placeholder", exc_info=True)
+    try:
+        profile = await runtime.learn_user_style(chat_id, sender_id=sender_id, label=display_name)
+    except ValueError as exc:
+        try:
+            await query.edit_message_text(str(exc))
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to edit learn error message", exc_info=True)
+        return
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Style learning failed", exc_info=True)
+        try:
+            await query.edit_message_text(f"Style learning error: {exc}")
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to edit learn error message", exc_info=True)
+        return
+    analysis = profile.get("analysis") or {}
+    tone = analysis.get("tone") or "unknown"
+    formality = analysis.get("formality") or "unknown"
+    languages = analysis.get("languages") or []
+    habits = analysis.get("habits") or []
+    behavior = analysis.get("behavior_profile") or {}
+    message_count = profile.get("message_count") or 0
+    parts: list[str] = [
+        f"Learned style profile for {display_name}.",
+        f"Messages analyzed: {message_count}.",
+        f"Tone: {tone}.",
+        f"Formality: {formality}.",
+    ]
+    if languages:
+        parts.append("Languages: " + ", ".join(str(lang) for lang in languages))
+    if habits:
+        preview_habits = ", ".join(str(h) for h in habits[:3])
+        parts.append(f"Habits: {preview_habits}")
+    if isinstance(behavior, dict):
+        conflict = behavior.get("conflict_style") or {}
+        decision = behavior.get("decision_style") or {}
+        emotional = behavior.get("emotional_heat") or {}
+        core_themes = behavior.get("core_themes") or []
+        conflict_label = conflict.get("label") if isinstance(conflict, dict) else None
+        decision_label = decision.get("label") if isinstance(decision, dict) else None
+        heat_score = emotional.get("score") if isinstance(emotional, dict) else None
+        if conflict_label:
+            parts.append(f"Conflict style: {conflict_label}")
+        if decision_label:
+            parts.append(f"Decision style: {decision_label}")
+        if isinstance(heat_score, (int, float)) and heat_score > 0:
+            parts.append(f"Emotional heat: {heat_score}")
+        if isinstance(core_themes, list) and core_themes:
+            parts.append("Core themes: " + ", ".join(str(t) for t in core_themes[:3]))
+    try:
+        await query.edit_message_text("\n".join(parts))
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("Failed to edit learn result message", exc_info=True)
 
 
 @require_authorized
@@ -969,9 +1128,11 @@ def build_application(settings: Settings) -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("reset", reset))
+    application.add_handler(CommandHandler("learn", learn_style))
     application.add_handler(CommandHandler("progress", toggle_progress))
     application.add_handler(CommandHandler("recap", recap_command))
     application.add_handler(CallbackQueryHandler(handle_recap_callback, pattern=r"^recap:(1h|1d)$"))
+    application.add_handler(CallbackQueryHandler(handle_learn_callback, pattern=r"^learn:"))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))

@@ -41,6 +41,10 @@ class ChatStore:
     def close(self) -> None:
         self._conn.close()
 
+    def get_connection(self) -> sqlite3.Connection:
+        """Expose the underlying SQLite connection for shared tables."""
+        return self._conn
+
     def add_message(
         self,
         *,
@@ -174,6 +178,49 @@ class ChatStore:
     ) -> Iterable[Dict[str, Any]]:
         for row in self.get_messages_in_range(external_conversation_id=external_conversation_id):
             yield row
+
+    def list_senders(
+        self,
+        *,
+        external_conversation_id: str,
+    ) -> List[str]:
+        """Return distinct sender_ids for user messages in a conversation."""
+        conversation_id = self._get_conversation_id(external_conversation_id)
+        if conversation_id is None:
+            return []
+        cursor = self._conn.execute(
+            """
+            SELECT DISTINCT sender_id
+            FROM messages
+            WHERE conversation_id = ?
+              AND sender_id IS NOT NULL
+              AND role = 'user'
+            """,
+            (conversation_id,),
+        )
+        rows = cursor.fetchall()
+        senders: List[str] = []
+        for row in rows:
+            raw = row["sender_id"]
+            if raw is None:
+                continue
+            value = str(raw)
+            if not value:
+                continue
+            if value == "assistant":
+                continue
+            if value.startswith("user") and len(value) > 4 and value[4:].isdigit():
+                value = value[4:]
+            senders.append(value)
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        result: List[str] = []
+        for sid in senders:
+            if sid in seen:
+                continue
+            seen.add(sid)
+            result.append(sid)
+        return result
 
     def _ensure_schema(self) -> None:
         with self._conn:

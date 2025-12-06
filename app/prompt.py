@@ -11,7 +11,11 @@ _BASE_INSTRUCTIONS = (
 )
 
 _WEB_SEARCH_SUFFIX = (
-    "When information might be time-sensitive or uncertain, use the web_search tool and cite any sources as [n](url)."
+    "Use the web_search tool sparingly. Prefer answering from your own knowledge and the chat history. "
+    "Only browse if the user asks you to check the web or the answer clearly depends on current, time-sensitive facts. "
+    "When you do browse, perform the minimum viable lookup, "
+    "stop as soon as you can answer, and cite sources as [n](url). Do not browse for timeless facts, definitions, or "
+    "general how-tos unless explicitly requested."
 )
 
 _NO_WEB_SEARCH_SUFFIX = (
