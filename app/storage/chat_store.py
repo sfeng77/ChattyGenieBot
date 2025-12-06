@@ -171,6 +171,35 @@ class ChatStore:
         rows = cursor.fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def get_last_messages(
+        self,
+        *,
+        external_conversation_id: str,
+        limit: int,
+        sender_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return the last `limit` messages for a conversation, optionally filtered by sender_id."""
+        conversation_id = self._get_conversation_id(external_conversation_id)
+        if conversation_id is None:
+            return []
+        params: List[Any] = [conversation_id]
+        where = ["conversation_id = ?"]
+        if sender_id is not None:
+            where.append("sender_id = ?")
+            params.append(str(sender_id))
+        sql = [
+            "SELECT * FROM messages",
+            "WHERE " + " AND ".join(where),
+            "ORDER BY created_at DESC, id DESC",
+            "LIMIT ?",
+        ]
+        params.append(max(1, int(limit)))
+        cursor = self._conn.execute("\n".join(sql), params)
+        rows = cursor.fetchall()
+        # Reverse again so caller sees chronological order
+        ordered = list(reversed([self._row_to_dict(row) for row in rows]))
+        return ordered
+
     def iter_messages(
         self,
         *,

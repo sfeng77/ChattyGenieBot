@@ -322,15 +322,27 @@ class AgentRuntime:
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
         limit: Optional[int] = None,
+        last_only: bool = False,
+        sender_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         history_id = self._history_id(chat_id)
         try:
-            return self._chat_store.get_messages_in_range(
+            if last_only and limit is not None and start is None and end is None:
+                return self._chat_store.get_last_messages(
+                    external_conversation_id=history_id,
+                    limit=limit,
+                    sender_id=sender_id,
+                )
+            messages = self._chat_store.get_messages_in_range(
                 external_conversation_id=history_id,
                 start=start,
                 end=end,
                 limit=limit,
             )
+            if sender_id is not None:
+                sid_str = str(sender_id)
+                return [m for m in messages if str(m.get("sender_id") or "") == sid_str]
+            return messages
         except Exception:  # noqa: BLE001
             LOGGER.exception("History fetch failed", exc_info=True)
             return []
@@ -409,28 +421,42 @@ class AgentRuntime:
         effective_min_messages = min_messages or int(self._settings.style_learn_min_messages)
         effective_max_chars = max_chars or int(self._settings.style_learn_max_chars)
         history_limit = max(effective_max_messages * 4, effective_max_messages + 20)
-        messages = self.get_history_messages(chat_id, limit=history_limit)
-        filtered = []
+        # Prefer more recent messages directly from the store, already filtered by sender_id
         sender_id_str = str(sender_id)
+        messages = self.get_history_messages(
+            chat_id,
+            limit=history_limit,
+            last_only=True,
+            sender_id=sender_id_str,
+        )
+        # Deduplicate by Telegram message id: for the same telegram_message_id keep only the last occurrence
+        filtered: list[Dict[str, Any]] = []
+        index_by_tg_id: dict[str, int] = {}
         for message in messages:
             role = message.get("role") or "user"
-            sid = message.get("sender_id")
             if role != "user":
-                continue
-            if sid is None:
-                continue
-            raw_sid = str(sid)
-            if raw_sid == "assistant":
-                continue
-            # Normalize historical formats: "user{telegram_id}" or raw id as string
-            if raw_sid.startswith("user") and len(raw_sid) > 4 and raw_sid[4:].isdigit():
-                raw_sid = raw_sid[4:]
-            if raw_sid != sender_id_str:
                 continue
             content = (message.get("content") or "").strip()
             if not content:
                 continue
-            filtered.append(message)
+            metadata = message.get("metadata") or {}
+            tg_id_val = None
+            if isinstance(metadata, dict):
+                tg_id_val = metadata.get("telegram_message_id")
+            key: str | None
+            if tg_id_val is not None:
+                key = f"tg:{tg_id_val}"
+            else:
+                # fall back to local id so messages without telegram_message_id are treated independently
+                mid = message.get("id")
+                key = f"id:{mid}" if mid is not None else None
+            if key is not None and key in index_by_tg_id:
+                # replace earlier occurrence so we keep the last one for this telegram_message_id
+                filtered[index_by_tg_id[key]] = message
+            else:
+                if key is not None:
+                    index_by_tg_id[key] = len(filtered)
+                filtered.append(message)
         if not filtered:
             raise ValueError("No user messages found to learn from.")
         if len(filtered) < effective_min_messages:
@@ -439,21 +465,22 @@ class AgentRuntime:
             filtered = filtered[-effective_max_messages:]
         # Input layer: prefer messages that carry reasoning or explanation
         reasoning_keywords = ("因为", "所以", "但是", "如果", "其实", "我觉得", "我感觉", "我一般会", "I think", "because", "however", "but", "if ")
-        scored_messages: list[tuple[int, Dict[str, Any]]] = []
-        for message in filtered:
+     
+        scored_messages: list[tuple[int, int, Dict[str, Any]]] = []
+        for idx, message in enumerate(filtered):
             text = (message.get("content") or "").strip()
             if not text:
                 continue
             length_score = 1 if len(text) >= 15 else 0
             reasoning_score = 1 if any(k in text for k in reasoning_keywords) else 0
             score = length_score + reasoning_score
-            scored_messages.append((score, message))
-        # Sort by score (high first), then by original order
-        scored_messages.sort(key=lambda pair: pair[0], reverse=True)
+            scored_messages.append((score, idx, message))
+        # Sort by score (high first), break ties by favoring more recent messages (higher idx)
+        scored_messages.sort(key=lambda pair: (pair[0], pair[1]), reverse=True)
         # Keep top N but fall back to all if everything scored the same
-        top_messages: list[Dict[str, Any]] = [m for score, m in scored_messages if score > 0]
+        top_messages: list[Dict[str, Any]] = [m for score, _, m in scored_messages if score > 0]
         if not top_messages:
-            top_messages = [m for _, m in scored_messages]
+            top_messages = [m for _, _, m in scored_messages]
         if len(top_messages) > effective_max_messages:
             top_messages = top_messages[:effective_max_messages]
         items: List[Dict[str, Any]] = []
