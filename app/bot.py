@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable, List, Sequence, Set
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update, User, Voice
 from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TelegramError
 
 from app.agent_runtime import AgentRuntime
 from app.config import Settings
@@ -50,11 +50,7 @@ async def _should_respond(
     - respond in private chats, or when mentioned, or when replied to.
     """
     # Determine chat type safely
-    is_private_chat = False
-    try:
-        is_private_chat = bool(message.chat and message.chat.type == ChatType.PRIVATE)
-    except Exception:
-        is_private_chat = False
+    is_private_chat = bool(message and message.chat and message.chat.type == ChatType.PRIVATE)
 
     bot_id, bot_username = await _ensure_bot_identity(context)
 
@@ -320,7 +316,7 @@ async def learn_style(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 member = await context.bot.get_chat_member(message.chat_id, user_id_int)
                 user_obj = member.user
                 label = user_obj.full_name or (user_obj.username or sid)
-            except Exception:  # noqa: BLE001
+            except (TelegramError, ValueError):
                 LOGGER.exception("Failed to resolve user for sender_id=%s", sid, exc_info=True)
         rows.append([InlineKeyboardButton(label, callback_data=f"learn:{sid}")])
     rows.append([InlineKeyboardButton("Cancel", callback_data="learn:cancel")])
@@ -342,21 +338,18 @@ async def handle_learn_callback(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer(text="Cancelled.")
         try:
             await query.edit_message_text("Style learning cancelled.")
-        except Exception:  # noqa: BLE001
+        except TelegramError:
             LOGGER.exception("Failed to edit learn cancel message", exc_info=True)
         return
     sender_id = token
     chat_id = query.message.chat_id
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
-    try:
-        runtime.log_message(
-            chat_id,
-            content=f"/learn {sender_id}",
-            sender_id=str(getattr(update.effective_user, "id", "")) or None,
-            metadata={"via": "learn_callback"},
-        )
-    except Exception:  # noqa: BLE001
-        LOGGER.exception("Failed to log learn callback", exc_info=True)
+    runtime.log_message(
+        chat_id,
+        content=f"/learn {sender_id}",
+        sender_id=str(getattr(update.effective_user, "id", "")) or None,
+        metadata={"via": "learn_callback"},
+    )
     await query.answer()
     display_name = sender_id
     user_id_int: int | None
@@ -369,25 +362,25 @@ async def handle_learn_callback(update: Update, context: ContextTypes.DEFAULT_TY
             member = await context.bot.get_chat_member(chat_id, user_id_int)
             user_obj = member.user
             display_name = user_obj.full_name or (user_obj.username or sender_id)
-        except Exception:  # noqa: BLE001
+        except (TelegramError, ValueError):
             LOGGER.exception("Failed to resolve user for sender_id=%s", sender_id, exc_info=True)
     try:
         await query.edit_message_text(f"Learning writing style for {display_name}...")
-    except Exception:  # noqa: BLE001
+    except TelegramError:
         LOGGER.exception("Failed to edit learn placeholder", exc_info=True)
     try:
         profile = await runtime.learn_user_style(chat_id, sender_id=sender_id, label=display_name)
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         try:
             await query.edit_message_text(str(exc))
-        except Exception:  # noqa: BLE001
+        except TelegramError:
             LOGGER.exception("Failed to edit learn error message", exc_info=True)
         return
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Style learning failed", exc_info=True)
+    except Exception:
+        LOGGER.exception("Style learning failed with an unexpected error", exc_info=True)
         try:
-            await query.edit_message_text(f"Style learning error: {exc}")
-        except Exception:  # noqa: BLE001
+            await query.edit_message_text("An unexpected error occurred during style learning.")
+        except TelegramError:
             LOGGER.exception("Failed to edit learn error message", exc_info=True)
         return
     analysis = profile.get("analysis") or {}
@@ -426,7 +419,7 @@ async def handle_learn_callback(update: Update, context: ContextTypes.DEFAULT_TY
             parts.append("Core themes: " + ", ".join(str(t) for t in core_themes[:3]))
     try:
         await query.edit_message_text("\n".join(parts))
-    except Exception:  # noqa: BLE001
+    except TelegramError:
         LOGGER.exception("Failed to edit learn result message", exc_info=True)
 
 
@@ -500,9 +493,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         LOGGER.info("Running vision agent with input:\n%s", agent_input)
         response = await runtime.run_message(chat_id, agent_input, sender_id=sender_id, log_user=False)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:
         LOGGER.exception("Agent vision run failed")
-        await placeholder.edit_text(f"Agent error: {exc}")
+        await placeholder.edit_text("An unexpected error occurred while analyzing the image.")
         return
 
     final_text = (response or "").strip() or "I am sorry, I could not describe that image."
@@ -514,7 +507,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             raw_text=final_text,
             disable_preview=False,
         )
-    except Exception:  # noqa: BLE001
+    except TelegramError:
         LOGGER.exception("Failed to edit vision placeholder", exc_info=True)
         try:
             await _send_markdown_with_fallback(
@@ -523,7 +516,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 raw_text=final_text,
                 disable_preview=False,
             )
-        except Exception:  # noqa: BLE001
+        except TelegramError:
             LOGGER.exception("Failed to send vision reply fallback", exc_info=True)
             await message.reply_text(final_text)
 
@@ -581,9 +574,13 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         summary = await runtime.recap_history(message.chat_id, start=start)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Recap generation failed")
+    except RuntimeError as exc:
+        LOGGER.warning("Recap generation failed: %s", exc)
         await placeholder.edit_text(f"Recap error: {exc}")
+        return
+    except Exception:
+        LOGGER.exception("Recap generation failed with an unexpected error")
+        await placeholder.edit_text("An unexpected error occurred during recap generation.")
         return
 
     if not summary:
@@ -593,7 +590,7 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         await placeholder.edit_text(final_text)
-    except Exception:  # noqa: BLE001
+    except TelegramError:
         LOGGER.exception("Failed to edit recap message", exc_info=True)
         await message.reply_text(final_text)
 
@@ -617,21 +614,22 @@ async def handle_recap_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
     # Log the action similar to command
-    try:
-        runtime.log_message(
-            query.message.chat_id,
-            content=f"/recap {period}",
-            sender_id=str(getattr(update.effective_user, "id", "")) or None,
-        )
-    except Exception:
-        LOGGER.exception("Failed to log recap callback", exc_info=True)
+    runtime.log_message(
+        query.message.chat_id,
+        content=f"/recap {period}",
+        sender_id=str(getattr(update.effective_user, "id", "")) or None,
+    )
 
     await context.bot.send_chat_action(chat_id=query.message.chat_id, action=ChatAction.TYPING)
     try:
         summary = await runtime.recap_history(query.message.chat_id, start=start)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Recap generation failed")
+    except RuntimeError as exc:
+        LOGGER.warning("Recap generation failed: %s", exc)
         await query.message.reply_text(f"Recap error: {exc}")
+        return
+    except Exception:
+        LOGGER.exception("Recap generation failed with an unexpected error")
+        await query.message.reply_text("An unexpected error occurred during recap generation.")
         return
 
     if not summary:
@@ -688,13 +686,19 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         transcription = await _transcribe_voice_note(voice, ffmpeg_path, asr_service)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Voice transcription failed")
+    except RuntimeError as exc:
+        LOGGER.warning("Voice transcription failed: %s", exc)
         try:
             await placeholder.edit_text(f"Transcription failed: {exc}")
-        except Exception:  # noqa: BLE001
+        except TelegramError:
             LOGGER.exception("Failed to edit transcription failure message", exc_info=True)
-            await message.reply_text(f"Transcription failed: {exc}")
+        return
+    except Exception:
+        LOGGER.exception("Voice transcription failed with an unexpected error")
+        try:
+            await placeholder.edit_text("An unexpected error occurred during transcription.")
+        except TelegramError:
+            LOGGER.exception("Failed to edit transcription failure message", exc_info=True)
         return
 
     transcript_text = (transcription.text or "").strip()
@@ -708,13 +712,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if settings.transcribe_echo_enabled:
         try:
             await placeholder.edit_text(display_text)
-        except Exception:  # noqa: BLE001
+        except TelegramError:
             LOGGER.exception("Failed to edit transcription placeholder", exc_info=True)
             await message.reply_text(display_text)
     else:
         try:
             await context.bot.delete_message(chat_id=message.chat_id, message_id=placeholder.message_id)
-        except Exception:  # noqa: BLE001
+        except TelegramError:
             LOGGER.debug("Failed to delete transcription placeholder", exc_info=True)
 
     metadata: dict[str, Any] = {
@@ -922,7 +926,7 @@ async def _run_agent_turn(
         try:
             await placeholder.edit_text(_format_timeline(timeline))
             last_edit = now
-        except Exception:  # noqa: BLE001
+        except TelegramError:
             LOGGER.exception("Progress edit failed", exc_info=True)
 
     async def on_progress(event: ProgressEvent) -> None:
@@ -1035,13 +1039,17 @@ async def _run_agent_turn(
                 sender_id=sender_id,
                 log_user=False,
             )
-        except Exception as exc:  # noqa: BLE001
+        except RuntimeError as exc:
             if error_text is None:
                 error_text = str(exc)
             raise
+        except Exception:
+            if error_text is None:
+                error_text = "An unexpected error occurred."
+            raise
         finally:
             remove_listener()
-    except Exception:
+    except (RuntimeError, Exception):
         LOGGER.exception("Agent run failed")
         await placeholder.edit_text(f"Agent error: {error_text or 'Agent run failed.'}")
         return
@@ -1065,7 +1073,7 @@ async def _run_agent_turn(
                 raw_text=final_plain,
                 disable_preview=False,
             )
-    except Exception:  # noqa: BLE001
+    except TelegramError:
         LOGGER.exception("Failed to send final message", exc_info=True)
         try:
             await _send_markdown_with_fallback(
@@ -1074,13 +1082,13 @@ async def _run_agent_turn(
                 raw_text=final_plain,
                 disable_preview=False,
             )
-        except Exception:  # noqa: BLE001
+        except TelegramError:
             LOGGER.exception("Fallback edit failed", exc_info=True)
             await message.reply_text(final_plain)
     if progress_enabled and not keep_timeline:
         try:
             await context.bot.delete_message(chat_id=message.chat_id, message_id=placeholder.message_id)
-        except Exception:  # noqa: BLE001
+        except TelegramError:
             LOGGER.exception("Failed to delete progress message", exc_info=True)
 
 
@@ -1108,8 +1116,11 @@ def build_application(settings: Settings) -> Application:
                 settings.asr_device,
                 settings.asr_compute_type,
             )
-        except Exception:  # noqa: BLE001
-            LOGGER.exception("Failed to initialize ASR service")
+        except (ImportError, ValueError) as e:
+            LOGGER.error("Failed to initialize ASR service: %s", e)
+            asr_service = None
+        except Exception:
+            LOGGER.exception("Failed to initialize ASR service with an unexpected error")
             asr_service = None
     else:
         LOGGER.info("ASR disabled by configuration")
