@@ -246,6 +246,26 @@ class AgentRuntime:
                     LOGGER.exception("Failed to persist user message to database", exc_info=True)
                 except Exception:
                     LOGGER.exception("Failed to persist user message with an unexpected error", exc_info=True)
+            
+            agent = self._agent
+            original_instructions = self._agent.instructions
+            if sender_id:
+                try:
+                    profile = self._style_store.get_profile(chat_id=chat_id, sender_id=sender_id)
+                    if profile and profile.get("style_prompt"):
+                        style_prompt = profile["style_prompt"]
+                        LOGGER.info("Applying style prompt for sender_id=%s", sender_id)
+                        new_instructions = f"{style_prompt}\n\n{original_instructions}"
+                        agent = Agent(
+                            name=self._agent.name,
+                            instructions=new_instructions,
+                            model=self._agent.model,
+                            model_settings=self._agent.model_settings,
+                            tools=self._agent.tools,
+                        )
+                except Exception:
+                    LOGGER.exception("Failed to apply style profile", exc_info=True)
+
             hooks = None
             active_dispatcher: ProgressDispatcher | None = None
             if dispatcher is not None and enable_progress:
@@ -258,7 +278,7 @@ class AgentRuntime:
                 )
             try:
                 result = await Runner.run(
-                    self._agent,
+                    agent,
                     user_message,
                     session=session,
                     hooks=hooks,
@@ -273,6 +293,10 @@ class AgentRuntime:
                         }
                     )
                 raise
+            finally:
+                if agent is not self._agent:
+                    self._agent.instructions = original_instructions
+
             output = result.final_output
             if isinstance(output, str):
                 response = output.strip()
@@ -459,7 +483,6 @@ class AgentRuntime:
         effective_min_messages = min_messages or int(self._settings.style_learn_min_messages)
         effective_max_chars = max_chars or int(self._settings.style_learn_max_chars)
         history_limit = max(effective_max_messages * 4, effective_max_messages + 20)
-        # Prefer more recent messages directly from the store, already filtered by sender_id
         sender_id_str = str(sender_id)
         messages = self.get_history_messages(
             chat_id,
@@ -467,7 +490,6 @@ class AgentRuntime:
             last_only=True,
             sender_id=sender_id_str,
         )
-        # Deduplicate by Telegram message id: for the same telegram_message_id keep only the last occurrence
         filtered: list[Dict[str, Any]] = []
         index_by_tg_id: dict[str, int] = {}
         for message in messages:
@@ -485,11 +507,9 @@ class AgentRuntime:
             if tg_id_val is not None:
                 key = f"tg:{tg_id_val}"
             else:
-                # fall back to local id so messages without telegram_message_id are treated independently
                 mid = message.get("id")
                 key = f"id:{mid}" if mid is not None else None
             if key is not None and key in index_by_tg_id:
-                # replace earlier occurrence so we keep the last one for this telegram_message_id
                 filtered[index_by_tg_id[key]] = message
             else:
                 if key is not None:
@@ -498,29 +518,13 @@ class AgentRuntime:
         if not filtered:
             raise ValueError("No user messages found to learn from.")
         if len(filtered) < effective_min_messages:
-            raise ValueError(f"Not enough messages to learn style (found {len(filtered)}, need at least {effective_min_messages}).")
+            raise ValueError(
+                f"Not enough messages to learn style (found {len(filtered)}, need at least {effective_min_messages})."
+            )
         if len(filtered) > effective_max_messages:
-            filtered = filtered[-effective_max_messages:]
-        # Input layer: prefer messages that carry reasoning or explanation
-        reasoning_keywords = ("因为", "所以", "但是", "如果", "其实", "我觉得", "我感觉", "我一般会", "I think", "because", "however", "but", "if ")
-     
-        scored_messages: list[tuple[int, int, Dict[str, Any]]] = []
-        for idx, message in enumerate(filtered):
-            text = (message.get("content") or "").strip()
-            if not text:
-                continue
-            length_score = 1 if len(text) >= 15 else 0
-            reasoning_score = 1 if any(k in text for k in reasoning_keywords) else 0
-            score = length_score + reasoning_score
-            scored_messages.append((score, idx, message))
-        # Sort by score (high first), break ties by favoring more recent messages (higher idx)
-        scored_messages.sort(key=lambda pair: (pair[0], pair[1]), reverse=True)
-        # Keep top N but fall back to all if everything scored the same
-        top_messages: list[Dict[str, Any]] = [m for score, _, m in scored_messages if score > 0]
-        if not top_messages:
-            top_messages = [m for _, _, m in scored_messages]
-        if len(top_messages) > effective_max_messages:
-            top_messages = top_messages[:effective_max_messages]
+            top_messages = filtered[-effective_max_messages:]
+        else:
+            top_messages = filtered
         items: List[Dict[str, Any]] = []
         sample_messages: List[str] = []
         for message in top_messages:
@@ -533,10 +537,11 @@ class AgentRuntime:
         if not transcript.strip():
             raise ValueError("User transcript is empty after preprocessing.")
         instructions = (
-            "You analyze chat messages from a single person and extract both their writing style and behavioral patterns. "
-            "Given example messages, identify tone, formality, languages, habits, subject-matter expertise, and how they tend to handle conflict, decisions, risk, and cooperation. "
-            "Then construct a compact style guide for an AI assistant.\n"
-            "Always respond with a single JSON object and nothing else."
+            "You are a style expert. Analyze the following messages from a user. "
+            "Create a concise system prompt that instructs an AI assistant on how to mimic this user's writing style, "
+            "including their tone, formality, language choice, use of emojis, and common phrases. "
+            "The prompt should be a direct instruction to the assistant. "
+            "Respond with only the generated system prompt and nothing else."
         )
         style_agent = Agent(
             name="Style Learner",
@@ -545,52 +550,11 @@ class AgentRuntime:
             model_settings=ModelSettings(temperature=self._settings.openai_temperature),
             tools=[],
         )
-        schema_hint = (
-            "Return a JSON object with the following structure:\n"
-            "{\n"
-            '  "style_prompt": "SYSTEM PROMPT FOR AN AI ASSISTANT...",\n'
-            '  "analysis": {\n'
-            '    "tone": "short description of overall tone",\n'
-            '    "formality": "informal / neutral / formal",\n'
-            '    "languages": ["en", "zh", "..."],\n'
-            '    "knowledge_domains": ["workplace", "relationships", "learning", "..."],\n'
-            '    "habits": ["common turns of phrase, 习惯用语, punctuation quirks"],\n'
-            '    "emoji_usage": "description of emoji usage",\n'
-            '    "sentence_style": "short / long / bullet-heavy / etc.",\n'
-            '    "behavior_profile": {\n'
-            '      "conflict_style": {"label": "confrontational / smooth_cooperative / avoidant / unknown", "score": 1, "evidence": ["..."]},\n'
-            '      "decision_style": {"label": "analysis_first / action_first / gut_feeling / unknown", "score": 4, "evidence": ["..."]},\n'
-            '      "risk_tolerance": {"score": 3, "evidence": ["..."]},\n'
-            '      "reasoning_pattern": {"label": "top_down / bottom_up / stream_of_consciousness / unknown", "evidence": ["..."]},\n'
-            '      "depth_preference": {"label": "high_level / detailed_with_examples / mixed / unknown", "evidence": ["..."]},\n'
-            '      "empathetic_style": {"label": "high / medium / low / unknown", "evidence": ["..."]},\n'
-            '      "disagreement_style": {"label": "direct_challenge / softening_corrections / avoidant / unknown", "evidence": ["..."]},\n'
-            '      "core_themes": ["pragmatic", "product_thinking", "learning_methods", "..."],\n'
-            '      "communication_style": {"label": "direct / diplomatic / teasing / indirect / unknown", "score": 5, "evidence": ["..."]},\n'
-            '      "cooperation_style": {"label": "persuasive_collaborator / lone_fighter / consensus_builder / unknown", "score": 3, "evidence": ["..."]},\n'
-            '      "emotional_heat": {"score": 3, "evidence": ["..."]}\n'
-            '    },\n'
-            '    "personality": {\n'
-            '      "mbti": "e.g. INTP, ESFJ, or unknown",\n'
-            '      "mbti_confidence": 0.0,\n'
-            '      "mbti_rationale": "brief explanation or empty string if unknown"\n'
-            '    },\n'
-            '    "other_notes": "any other relevant traits"\n'
-            "  }\n"
-            "}\n"
-            'The "style_prompt" must be written as instructions to an AI assistant about how to respond in this user\'s style. '
-            "Do not include personal identifiers or concrete private details; focus on style, tone, and behavioral tendencies. "
-            "If there is not enough information for a dimension, use neutral defaults (e.g. label=\"unknown\", score=0)."
-            "Do not simply copy these example scores. Infer a score between 0 and 5 for each dimension based on the messages; use 0 only when there is not enough information."
-        )
-
         prompt = (
-            "You are given example chat messages written by a single user. "
-            "Study how they write and produce a style and behavior guide.\n\n"
+            "Analyze these example messages and generate a system prompt to instruct an AI assistant.\n\n"
             "Example messages (in chronological order):\n"
             f"{transcript}\n\n"
-            f"{schema_hint}\n\n"
-            "Return only the JSON object."
+            "Respond with only the system prompt text."
         )
         try:
             result = await Runner.run(style_agent, prompt, session=None, max_turns=1)
@@ -599,38 +563,14 @@ class AgentRuntime:
             LOGGER.exception("Style learning model call failed", exc_info=True)
             raise RuntimeError(f"Style learning failed: {exc}") from exc
         if isinstance(output, str):
-            text = output.strip()
+            style_prompt = output.strip()
         elif output is None:
-            text = ""
+            style_prompt = ""
         else:
-            text = str(output).strip()
-        if not text:
+            style_prompt = str(output).strip()
+        if not style_prompt:
             raise RuntimeError("Style learning returned an empty response.")
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            LOGGER.warning("Failed to parse style learner JSON, falling back to generic prompt: %s", exc)
-            style_prompt = (
-                "When responding, mimic this user's chat style based on the provided examples. "
-                "Use their usual tone, level of formality, preferred languages (including any EN/中文 mixing), "
-                "and common turns of phrase, but do not reveal private details or pretend to actually be them."
-            )
-            analysis: Dict[str, Any] = {
-                "raw_response": text,
-            }
-        else:
-            if not isinstance(payload, dict):
-                raise RuntimeError("Style learning response was not a JSON object.")
-            style_prompt_val = payload.get("style_prompt")
-            analysis_val = payload.get("analysis")
-            style_prompt = (style_prompt_val or "").strip() if isinstance(style_prompt_val, str) else ""
-            if not style_prompt:
-                style_prompt = (
-                    "When responding, mimic this user's chat style based on the provided examples. "
-                    "Use their usual tone, level of formality, preferred languages (including any EN/中文 mixing), "
-                    "and common turns of phrase, but do not reveal private details or pretend to actually be them."
-                )
-            analysis = analysis_val if isinstance(analysis_val, dict) else {}
+        analysis: Dict[str, Any] = {}
         resolved_label = label or f"user-{sender_id_str}"
         LOGGER.info(
             "Learned style profile for chat_id=%s sender_id=%s label=%s (messages_used=%s)",
