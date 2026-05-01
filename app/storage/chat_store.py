@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+LOGGER = logging.getLogger(__name__)
 
 
 ISO_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -97,7 +100,8 @@ class ChatStore:
         join = ""
         order = ""
         select_snippet = ""
-        if self._fts_enabled:
+        use_fts = self._fts_enabled and len(query.replace(" ", "")) >= 3
+        if use_fts:
             select_snippet = ", snippet(messages_fts, 0, '[', ']', ' … ', 24) AS snippet, bm25(messages_fts) AS score"
             sql = [
                 "SELECT m.*" + select_snippet,
@@ -297,12 +301,13 @@ class ChatStore:
         try:
             if not self._fts_available():
                 return
+            self._migrate_fts_to_trigram()
             with self._conn:
                 self._conn.execute(
                     """
                     CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                         content,
-                        tokenize = 'unicode61 remove_diacritics 2',
+                        tokenize = 'trigram',
                         content = 'messages',
                         content_rowid = 'id'
                     )
@@ -334,6 +339,31 @@ class ChatStore:
             self._fts_enabled = False
         else:
             self._fts_enabled = True
+
+    def _migrate_fts_to_trigram(self) -> None:
+        """Drop and rebuild the FTS table if it uses the old unicode61 tokenizer."""
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages_fts'"
+        ).fetchone()
+        if row is None or "trigram" in row[0]:
+            return
+        LOGGER.info("Migrating messages_fts to trigram tokenizer")
+        with self._conn:
+            for trigger in ("messages_ai", "messages_ad", "messages_au"):
+                self._conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            self._conn.execute("DROP TABLE IF EXISTS messages_fts")
+            self._conn.execute(
+                """
+                CREATE VIRTUAL TABLE messages_fts USING fts5(
+                    content,
+                    tokenize = 'trigram',
+                    content = 'messages',
+                    content_rowid = 'id'
+                )
+                """
+            )
+            self._conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
+        LOGGER.info("messages_fts migration to trigram complete")
 
     def _fts_available(self) -> bool:
         cursor = self._conn.execute("SELECT 1 FROM pragma_module_list WHERE name = 'fts5'")

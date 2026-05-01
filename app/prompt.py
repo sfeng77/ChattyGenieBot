@@ -45,6 +45,13 @@ _REMINDER_SUFFIX = (
     "If the tool reports a parse failure, ask the user to rephrase the time."
 )
 
+_MEMORY_SUFFIX = (
+    "You have access to a search_memory tool that searches past conversations. "
+    "Use it proactively when the user references something from a previous chat, asks 'do you remember', "
+    "or when their question likely depends on past context you don't have in the current session. "
+    "Keep memory lookups focused — pass a tight 2-4 word keyword query."
+)
+
 
 def get_agent_instructions(
     web_search_available: bool,
@@ -57,6 +64,7 @@ def get_agent_instructions(
     suffixes.append(_FINANCE_SUFFIX if finance_tool_available else _NO_FINANCE_SUFFIX)
     suffixes.append(_VISION_SUFFIX if vision_tool_available else _NO_VISION_SUFFIX)
     suffixes.append(_REMINDER_SUFFIX)
+    suffixes.append(_MEMORY_SUFFIX)
     return _BASE_INSTRUCTIONS + " ".join(suffixes)
 
 

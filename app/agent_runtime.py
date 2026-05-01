@@ -31,6 +31,7 @@ from app.tools import (
     create_stock_trend_tool,
     create_vision_tool,
 )
+from app.tools.memory import create_search_memory_tool
 from app.tools.reminder import current_chat_id
 from app.web_search_client import WebSearchClient
 
@@ -51,7 +52,10 @@ class AgentRuntime:
                 base_url=settings.openai_api_base,
             )
             set_default_openai_client(client)
+        self._chat_store = ChatStore(settings.chat_history_db_path)
         tools: List[object] = []
+        self._search_memory_tool = create_search_memory_tool(self._chat_store)
+        tools.append(self._search_memory_tool)
         self._web_search_tool = None
         self._finance_tool = None
         self._vision_tool = None
@@ -115,7 +119,6 @@ class AgentRuntime:
             tools=tools,
         )
         self._sessions: Dict[int, SQLiteSession] = {}
-        self._chat_store = ChatStore(settings.chat_history_db_path)
 
     def get_db_connection(self):
         """Return the shared SQLite connection for additional stores."""
