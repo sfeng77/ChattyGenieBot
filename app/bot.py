@@ -12,12 +12,14 @@ from typing import Any, Awaitable, Callable, List, Sequence, Set
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update, User, Voice
 from telegram.constants import ChatAction, ChatType, ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
-from telegram.error import BadRequest, TelegramError
+from telegram.error import BadRequest
 
 from app.agent_runtime import AgentRuntime
 from app.config import Settings
 from app.asr import ASRService, TranscriptionResult, create_asr_service
 from app.progress import ProgressDispatcher, ProgressEvent
+from app.storage.reminder_store import ReminderStore, parse_remind_at
+from app.tools.reminder import create_reminder_tool, schedule_reminder_job
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ BOT_ID_KEY = "bot_id"
 BOT_USERNAME_KEY = "bot_username"
 ASR_SERVICE_KEY = "asr_service"
 FFMPEG_PATH_KEY = "ffmpeg_path"
+REMINDER_STORE_KEY = "reminder_store"
 
 HandlerFunc = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
@@ -50,7 +53,11 @@ async def _should_respond(
     - respond in private chats, or when mentioned, or when replied to.
     """
     # Determine chat type safely
-    is_private_chat = bool(message and message.chat and message.chat.type == ChatType.PRIVATE)
+    is_private_chat = False
+    try:
+        is_private_chat = bool(message.chat and message.chat.type == ChatType.PRIVATE)
+    except Exception:
+        is_private_chat = False
 
     bot_id, bot_username = await _ensure_bot_identity(context)
 
@@ -243,8 +250,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/help - command reference\n"
         "/reset - clear conversation memory\n"
         "/progress - toggle live progress updates for this chat\n"
-        "/recap - summarize last 1h/1d of this chat\n"
-        "/learn - learn a user's writing style from recent chat history (reply to a user or run directly to learn your own style)"
+        "/recap - summarize last 1h/1d of this chat"
     )
 
 
@@ -267,160 +273,6 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
     await runtime.reset(message.chat_id)
     await message.reply_text("Conversation memory cleared.")
-
-
-@require_authorized
-async def learn_style(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    if message is None:
-        return
-    LOGGER.info("/learn invoked by chat_id=%s", message.chat_id)
-    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
-    from_user = message.from_user
-    runtime.log_message(
-        message.chat_id,
-        content=message.text or "/learn",
-        sender_id=str(from_user.id) if from_user and from_user.id is not None else None,
-        created_at=message.date,
-        metadata={"telegram_message_id": message.id},
-    )
-    sender_ids = runtime.list_chat_senders(message.chat_id)
-    if not sender_ids:
-        await message.reply_text("No user messages found in this chat to learn from yet.")
-        return
-    preferred: list[str] = []
-    reply_user = message.reply_to_message.from_user if message.reply_to_message and message.reply_to_message.from_user else None
-    if reply_user and reply_user.id is not None:
-        preferred.append(str(reply_user.id))
-    if from_user and from_user.id is not None:
-        preferred.append(str(from_user.id))
-    ordered: list[str] = []
-    seen: set[str] = set()
-    for sid in preferred:
-        if sid in sender_ids and sid not in seen:
-            ordered.append(sid)
-            seen.add(sid)
-    for sid in sender_ids:
-        if sid not in seen:
-            ordered.append(sid)
-            seen.add(sid)
-    rows: list[list[InlineKeyboardButton]] = []
-    for sid in ordered:
-        label = sid
-        try:
-            user_id_int = int(sid)
-        except ValueError:
-            user_id_int = None
-        if user_id_int is not None:
-            try:
-                member = await context.bot.get_chat_member(message.chat_id, user_id_int)
-                user_obj = member.user
-                label = user_obj.full_name or (user_obj.username or sid)
-            except (TelegramError, ValueError):
-                LOGGER.exception("Failed to resolve user for sender_id=%s", sid, exc_info=True)
-        rows.append([InlineKeyboardButton(label, callback_data=f"learn:{sid}")])
-    rows.append([InlineKeyboardButton("Cancel", callback_data="learn:cancel")])
-    keyboard = InlineKeyboardMarkup(rows)
-    await message.reply_text("Select a user to learn style from:", reply_markup=keyboard)
-
-
-@require_authorized
-async def handle_learn_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if query is None:
-        return
-    data = (query.data or "").strip()
-    if not data.startswith("learn:"):
-        await query.answer()
-        return
-    token = data.split(":", 1)[1]
-    if token == "cancel":
-        await query.answer(text="Cancelled.")
-        try:
-            await query.edit_message_text("Style learning cancelled.")
-        except TelegramError:
-            LOGGER.exception("Failed to edit learn cancel message", exc_info=True)
-        return
-    sender_id = token
-    chat_id = query.message.chat_id
-    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
-    runtime.log_message(
-        chat_id,
-        content=f"/learn {sender_id}",
-        sender_id=str(getattr(update.effective_user, "id", "")) or None,
-        metadata={"via": "learn_callback"},
-    )
-    await query.answer()
-    display_name = sender_id
-    user_id_int: int | None
-    try:
-        user_id_int = int(sender_id)
-    except ValueError:
-        user_id_int = None
-    if user_id_int is not None:
-        try:
-            member = await context.bot.get_chat_member(chat_id, user_id_int)
-            user_obj = member.user
-            display_name = user_obj.full_name or (user_obj.username or sender_id)
-        except (TelegramError, ValueError):
-            LOGGER.exception("Failed to resolve user for sender_id=%s", sender_id, exc_info=True)
-    try:
-        await query.edit_message_text(f"Learning writing style for {display_name}...")
-    except TelegramError:
-        LOGGER.exception("Failed to edit learn placeholder", exc_info=True)
-    try:
-        profile = await runtime.learn_user_style(chat_id, sender_id=sender_id, label=display_name)
-    except (ValueError, RuntimeError) as exc:
-        try:
-            await query.edit_message_text(str(exc))
-        except TelegramError:
-            LOGGER.exception("Failed to edit learn error message", exc_info=True)
-        return
-    except Exception:
-        LOGGER.exception("Style learning failed with an unexpected error", exc_info=True)
-        try:
-            await query.edit_message_text("An unexpected error occurred during style learning.")
-        except TelegramError:
-            LOGGER.exception("Failed to edit learn error message", exc_info=True)
-        return
-    analysis = profile.get("analysis") or {}
-    tone = analysis.get("tone") or "unknown"
-    formality = analysis.get("formality") or "unknown"
-    languages = analysis.get("languages") or []
-    habits = analysis.get("habits") or []
-    behavior = analysis.get("behavior_profile") or {}
-    message_count = profile.get("message_count") or 0
-    parts: list[str] = [
-        f"Learned style profile for {display_name}.",
-        f"Messages analyzed: {message_count}.",
-        f"Tone: {tone}.",
-        f"Formality: {formality}.",
-    ]
-    if languages:
-        parts.append("Languages: " + ", ".join(str(lang) for lang in languages))
-    if habits:
-        preview_habits = ", ".join(str(h) for h in habits[:3])
-        parts.append(f"Habits: {preview_habits}")
-    if isinstance(behavior, dict):
-        conflict = behavior.get("conflict_style") or {}
-        decision = behavior.get("decision_style") or {}
-        emotional = behavior.get("emotional_heat") or {}
-        core_themes = behavior.get("core_themes") or []
-        conflict_label = conflict.get("label") if isinstance(conflict, dict) else None
-        decision_label = decision.get("label") if isinstance(decision, dict) else None
-        heat_score = emotional.get("score") if isinstance(emotional, dict) else None
-        if conflict_label:
-            parts.append(f"Conflict style: {conflict_label}")
-        if decision_label:
-            parts.append(f"Decision style: {decision_label}")
-        if isinstance(heat_score, (int, float)) and heat_score > 0:
-            parts.append(f"Emotional heat: {heat_score}")
-        if isinstance(core_themes, list) and core_themes:
-            parts.append("Core themes: " + ", ".join(str(t) for t in core_themes[:3]))
-    try:
-        await query.edit_message_text("\n".join(parts))
-    except TelegramError:
-        LOGGER.exception("Failed to edit learn result message", exc_info=True)
 
 
 @require_authorized
@@ -493,9 +345,9 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         LOGGER.info("Running vision agent with input:\n%s", agent_input)
         response = await runtime.run_message(chat_id, agent_input, sender_id=sender_id, log_user=False)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Agent vision run failed")
-        await placeholder.edit_text("An unexpected error occurred while analyzing the image.")
+        await placeholder.edit_text(f"Agent error: {exc}")
         return
 
     final_text = (response or "").strip() or "I am sorry, I could not describe that image."
@@ -507,7 +359,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             raw_text=final_text,
             disable_preview=False,
         )
-    except TelegramError:
+    except Exception:  # noqa: BLE001
         LOGGER.exception("Failed to edit vision placeholder", exc_info=True)
         try:
             await _send_markdown_with_fallback(
@@ -516,7 +368,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 raw_text=final_text,
                 disable_preview=False,
             )
-        except TelegramError:
+        except Exception:  # noqa: BLE001
             LOGGER.exception("Failed to send vision reply fallback", exc_info=True)
             await message.reply_text(final_text)
 
@@ -574,13 +426,9 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         summary = await runtime.recap_history(message.chat_id, start=start)
-    except RuntimeError as exc:
-        LOGGER.warning("Recap generation failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Recap generation failed")
         await placeholder.edit_text(f"Recap error: {exc}")
-        return
-    except Exception:
-        LOGGER.exception("Recap generation failed with an unexpected error")
-        await placeholder.edit_text("An unexpected error occurred during recap generation.")
         return
 
     if not summary:
@@ -590,7 +438,7 @@ async def recap_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     try:
         await placeholder.edit_text(final_text)
-    except TelegramError:
+    except Exception:  # noqa: BLE001
         LOGGER.exception("Failed to edit recap message", exc_info=True)
         await message.reply_text(final_text)
 
@@ -614,22 +462,21 @@ async def handle_recap_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
     # Log the action similar to command
-    runtime.log_message(
-        query.message.chat_id,
-        content=f"/recap {period}",
-        sender_id=str(getattr(update.effective_user, "id", "")) or None,
-    )
+    try:
+        runtime.log_message(
+            query.message.chat_id,
+            content=f"/recap {period}",
+            sender_id=str(getattr(update.effective_user, "id", "")) or None,
+        )
+    except Exception:
+        LOGGER.exception("Failed to log recap callback", exc_info=True)
 
     await context.bot.send_chat_action(chat_id=query.message.chat_id, action=ChatAction.TYPING)
     try:
         summary = await runtime.recap_history(query.message.chat_id, start=start)
-    except RuntimeError as exc:
-        LOGGER.warning("Recap generation failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Recap generation failed")
         await query.message.reply_text(f"Recap error: {exc}")
-        return
-    except Exception:
-        LOGGER.exception("Recap generation failed with an unexpected error")
-        await query.message.reply_text("An unexpected error occurred during recap generation.")
         return
 
     if not summary:
@@ -686,19 +533,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     try:
         transcription = await _transcribe_voice_note(voice, ffmpeg_path, asr_service)
-    except RuntimeError as exc:
-        LOGGER.warning("Voice transcription failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Voice transcription failed")
         try:
             await placeholder.edit_text(f"Transcription failed: {exc}")
-        except TelegramError:
+        except Exception:  # noqa: BLE001
             LOGGER.exception("Failed to edit transcription failure message", exc_info=True)
-        return
-    except Exception:
-        LOGGER.exception("Voice transcription failed with an unexpected error")
-        try:
-            await placeholder.edit_text("An unexpected error occurred during transcription.")
-        except TelegramError:
-            LOGGER.exception("Failed to edit transcription failure message", exc_info=True)
+            await message.reply_text(f"Transcription failed: {exc}")
         return
 
     transcript_text = (transcription.text or "").strip()
@@ -712,13 +553,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if settings.transcribe_echo_enabled:
         try:
             await placeholder.edit_text(display_text)
-        except TelegramError:
+        except Exception:  # noqa: BLE001
             LOGGER.exception("Failed to edit transcription placeholder", exc_info=True)
             await message.reply_text(display_text)
     else:
         try:
             await context.bot.delete_message(chat_id=message.chat_id, message_id=placeholder.message_id)
-        except TelegramError:
+        except Exception:  # noqa: BLE001
             LOGGER.debug("Failed to delete transcription placeholder", exc_info=True)
 
     metadata: dict[str, Any] = {
@@ -926,7 +767,7 @@ async def _run_agent_turn(
         try:
             await placeholder.edit_text(_format_timeline(timeline))
             last_edit = now
-        except TelegramError:
+        except Exception:  # noqa: BLE001
             LOGGER.exception("Progress edit failed", exc_info=True)
 
     async def on_progress(event: ProgressEvent) -> None:
@@ -1039,17 +880,13 @@ async def _run_agent_turn(
                 sender_id=sender_id,
                 log_user=False,
             )
-        except RuntimeError as exc:
+        except Exception as exc:  # noqa: BLE001
             if error_text is None:
                 error_text = str(exc)
             raise
-        except Exception:
-            if error_text is None:
-                error_text = "An unexpected error occurred."
-            raise
         finally:
             remove_listener()
-    except (RuntimeError, Exception):
+    except Exception:
         LOGGER.exception("Agent run failed")
         await placeholder.edit_text(f"Agent error: {error_text or 'Agent run failed.'}")
         return
@@ -1073,7 +910,7 @@ async def _run_agent_turn(
                 raw_text=final_plain,
                 disable_preview=False,
             )
-    except TelegramError:
+    except Exception:  # noqa: BLE001
         LOGGER.exception("Failed to send final message", exc_info=True)
         try:
             await _send_markdown_with_fallback(
@@ -1082,13 +919,13 @@ async def _run_agent_turn(
                 raw_text=final_plain,
                 disable_preview=False,
             )
-        except TelegramError:
+        except Exception:  # noqa: BLE001
             LOGGER.exception("Fallback edit failed", exc_info=True)
             await message.reply_text(final_plain)
     if progress_enabled and not keep_timeline:
         try:
             await context.bot.delete_message(chat_id=message.chat_id, message_id=placeholder.message_id)
-        except TelegramError:
+        except Exception:  # noqa: BLE001
             LOGGER.exception("Failed to delete progress message", exc_info=True)
 
 
@@ -1116,11 +953,8 @@ def build_application(settings: Settings) -> Application:
                 settings.asr_device,
                 settings.asr_compute_type,
             )
-        except (ImportError, ValueError) as e:
-            LOGGER.error("Failed to initialize ASR service: %s", e)
-            asr_service = None
-        except Exception:
-            LOGGER.exception("Failed to initialize ASR service with an unexpected error")
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to initialize ASR service")
             asr_service = None
     else:
         LOGGER.info("ASR disabled by configuration")
@@ -1129,21 +963,59 @@ def build_application(settings: Settings) -> Application:
     if settings.asr_enabled and not ffmpeg_path_resolved:
         LOGGER.warning("ASR is enabled but ffmpeg was not found at %s", settings.ffmpeg_path)
 
-    application = Application.builder().token(settings.telegram_bot_token).build()
+    reminder_store = ReminderStore(runtime.get_db_connection())
+
+    async def _restore_reminders(app: Application) -> None:
+        """Re-register any pending reminders from DB after a bot restart."""
+        now = datetime.now(timezone.utc)
+        pending = reminder_store.get_pending_reminders()
+        restored = 0
+        for row in pending:
+            try:
+                remind_at = parse_remind_at(str(row["remind_at"]))
+            except Exception:  # noqa: BLE001
+                LOGGER.warning("Skipping unparseable reminder id=%s remind_at=%s", row["id"], row["remind_at"])
+                reminder_store.mark_done(int(row["id"]))
+                continue
+            if remind_at <= now:
+                reminder_store.mark_done(int(row["id"]))
+                continue
+            delay = (remind_at - now).total_seconds()
+            schedule_reminder_job(
+                app,
+                chat_id=int(row["chat_id"]),
+                reminder_id=int(row["id"]),
+                message=str(row["message"]),
+                delay=delay,
+                store=reminder_store,
+            )
+            restored += 1
+        if restored:
+            LOGGER.info("Restored %d pending reminders from DB", restored)
+
+    application = (
+        Application.builder()
+        .token(settings.telegram_bot_token)
+        .post_init(_restore_reminders)
+        .build()
+    )
+
+    reminder_tool = create_reminder_tool(reminder_store, application)
+    runtime.add_tool(reminder_tool)
+
     application.bot_data[SETTINGS_KEY] = settings
     application.bot_data[AGENT_RUNTIME_KEY] = runtime
     application.bot_data[WHITELIST_KEY] = _parse_whitelist(settings.whitelisted_user_ids)
     application.bot_data[ASR_SERVICE_KEY] = asr_service
     application.bot_data[FFMPEG_PATH_KEY] = ffmpeg_path_resolved
+    application.bot_data[REMINDER_STORE_KEY] = reminder_store
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("reset", reset))
-    application.add_handler(CommandHandler("learn", learn_style))
     application.add_handler(CommandHandler("progress", toggle_progress))
     application.add_handler(CommandHandler("recap", recap_command))
     application.add_handler(CallbackQueryHandler(handle_recap_callback, pattern=r"^recap:(1h|1d)$"))
-    application.add_handler(CallbackQueryHandler(handle_learn_callback, pattern=r"^learn:"))
     application.add_handler(MessageHandler(filters.VOICE, handle_voice))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))

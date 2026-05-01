@@ -65,10 +65,6 @@ class Settings(BaseSettings):
     whitelisted_user_ids: str | None = Field(None, alias="WHITELISTED_USER_IDS")
     sessions_db_path: Path = Field(Path("data") / "sessions" / "sessions.db", alias="SESSIONS_DB_PATH")
     chat_history_db_path: Path = Field(Path("data") / "history" / "chat_history.db", alias="CHAT_HISTORY_DB_PATH")
-    style_learn_max_messages: int = Field(500, alias="STYLE_LEARN_MAX_MESSAGES")
-    style_learn_min_messages: int = Field(20, alias="STYLE_LEARN_MIN_MESSAGES")
-    style_learn_max_chars: int = Field(16000, alias="STYLE_LEARN_MAX_CHARS")
-
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

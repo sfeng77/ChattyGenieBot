@@ -38,6 +38,13 @@ _NO_VISION_SUFFIX = (
     "If a user sends an image, explain that image analysis is currently unavailable and invite them to describe the picture in text instead."
 )
 
+_REMINDER_SUFFIX = (
+    "When a user asks to be reminded of something at a future time, call the set_reminder tool with "
+    "the natural-language time expression and the reminder content. "
+    "Confirm the scheduled time in your reply. "
+    "If the tool reports a parse failure, ask the user to rephrase the time."
+)
+
 
 def get_agent_instructions(
     web_search_available: bool,
@@ -49,6 +56,7 @@ def get_agent_instructions(
     suffixes.append(_WEB_SEARCH_SUFFIX if web_search_available else _NO_WEB_SEARCH_SUFFIX)
     suffixes.append(_FINANCE_SUFFIX if finance_tool_available else _NO_FINANCE_SUFFIX)
     suffixes.append(_VISION_SUFFIX if vision_tool_available else _NO_VISION_SUFFIX)
+    suffixes.append(_REMINDER_SUFFIX)
     return _BASE_INSTRUCTIONS + " ".join(suffixes)
 
 

@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
-import json
 import logging
-import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -26,7 +23,6 @@ from app.progress_hooks import ProgressHooks
 from app.finance_client import AlphaVantageClient
 from app.prompt import get_agent_instructions
 from app.storage.chat_store import ChatStore
-from app.storage.style_profile_store import StyleProfileStore
 from app.tools import (
     create_disabled_finance_tool,
     create_disabled_vision_tool,
@@ -35,6 +31,7 @@ from app.tools import (
     create_stock_trend_tool,
     create_vision_tool,
 )
+from app.tools.reminder import current_chat_id
 from app.web_search_client import WebSearchClient
 
 LOGGER = logging.getLogger(__name__)
@@ -64,9 +61,7 @@ class AgentRuntime:
         if settings.web_search_enabled:
             try:
                 self._web_search_tool = self._build_web_search_tool()
-            except ValueError as e:
-                LOGGER.error("Configuration error initializing web_search tool: %s", e)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 LOGGER.exception("Failed to initialize web_search tool")
             else:
                 tools.append(self._web_search_tool)
@@ -82,9 +77,7 @@ class AgentRuntime:
         if settings.finance_enabled:
             try:
                 self._finance_tool = self._build_finance_tool()
-            except ValueError as e:
-                LOGGER.error("Configuration error initializing stock_trend tool: %s", e)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 LOGGER.exception("Failed to initialize stock_trend tool")
             else:
                 tools.append(self._finance_tool)
@@ -100,9 +93,7 @@ class AgentRuntime:
         if settings.vision_enabled:
             try:
                 self._vision_tool = self._build_vision_tool()
-            except ValueError as e:
-                LOGGER.error("Configuration error initializing vision tool: %s", e)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 LOGGER.exception("Failed to initialize vision tool")
             else:
                 tools.append(self._vision_tool)
@@ -120,20 +111,19 @@ class AgentRuntime:
             name="Agent Mushroom",
             instructions=instructions,
             model=settings.openai_model,
-            model_settings=ModelSettings(temperature=settings.openai_temperature),
+            model_settings=ModelSettings(temperature=settings.openai_temperature, extra_body={"think": False}),
             tools=tools,
         )
         self._sessions: Dict[int, SQLiteSession] = {}
-        self._chat_locks: Dict[int, asyncio.Lock] = {}
         self._chat_store = ChatStore(settings.chat_history_db_path)
-        self._style_store = StyleProfileStore(self._chat_store.get_connection())
 
-    def _get_chat_lock(self, chat_id: int) -> asyncio.Lock:
-        lock = self._chat_locks.get(chat_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._chat_locks[chat_id] = lock
-        return lock
+    def get_db_connection(self):
+        """Return the shared SQLite connection for additional stores."""
+        return self._chat_store.get_connection()
+
+    def add_tool(self, tool) -> None:
+        """Append a tool to the agent after initial construction."""
+        self._agent.tools = list(self._agent.tools) + [tool]
 
     def _build_web_search_tool(self):
         client = WebSearchClient(
@@ -223,62 +213,38 @@ class AgentRuntime:
         sender_id: str | None = None,
         log_user: bool = True,
     ) -> str:
-        lock = self._get_chat_lock(chat_id)
-        async with lock:
-            session = self._get_session(chat_id)
-            if self._settings.history_prune_enabled:
-                try:
-                    await self._maybe_prune_session(session)
-                except sqlite3.Error:
-                    LOGGER.exception("History pruning failed during database operation", exc_info=True)
-                except Exception:
-                    LOGGER.exception("History pruning failed with an unexpected error", exc_info=True)
-            history_id = self._history_id(chat_id)
-            if log_user:
-                try:
-                    self._chat_store.add_message(
-                        external_conversation_id=history_id,
-                        role="user",
-                        content=user_message,
-                        sender_id=sender_id,
-                    )
-                except sqlite3.Error:
-                    LOGGER.exception("Failed to persist user message to database", exc_info=True)
-                except Exception:
-                    LOGGER.exception("Failed to persist user message with an unexpected error", exc_info=True)
-            
-            agent = self._agent
-            original_instructions = self._agent.instructions
-            if sender_id:
-                try:
-                    profile = self._style_store.get_profile(chat_id=chat_id, sender_id=sender_id)
-                    if profile and profile.get("style_prompt"):
-                        style_prompt = profile["style_prompt"]
-                        LOGGER.info("Applying style prompt for sender_id=%s", sender_id)
-                        new_instructions = f"{style_prompt}\n\n{original_instructions}"
-                        agent = Agent(
-                            name=self._agent.name,
-                            instructions=new_instructions,
-                            model=self._agent.model,
-                            model_settings=self._agent.model_settings,
-                            tools=self._agent.tools,
-                        )
-                except Exception:
-                    LOGGER.exception("Failed to apply style profile", exc_info=True)
-
-            hooks = None
-            active_dispatcher: ProgressDispatcher | None = None
-            if dispatcher is not None and enable_progress:
-                active_dispatcher = dispatcher
-                hooks = ProgressHooks(
-                    dispatcher=dispatcher,
-                    chat_id=chat_id,
-                    user_message=user_message,
-                    result_char_limit=self._progress_result_char_limit,
+        session = self._get_session(chat_id)
+        _chat_id_token = current_chat_id.set(chat_id)
+        if self._settings.history_prune_enabled:
+            try:
+                await self._maybe_prune_session(session)
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("History pruning failed", exc_info=True)
+        history_id = self._history_id(chat_id)
+        if log_user:
+            try:
+                self._chat_store.add_message(
+                    external_conversation_id=history_id,
+                    role="user",
+                    content=user_message,
+                    sender_id=sender_id,
                 )
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to persist user message", exc_info=True)
+        hooks = None
+        active_dispatcher: ProgressDispatcher | None = None
+        if dispatcher is not None and enable_progress:
+            active_dispatcher = dispatcher
+            hooks = ProgressHooks(
+                dispatcher=dispatcher,
+                chat_id=chat_id,
+                user_message=user_message,
+                result_char_limit=self._progress_result_char_limit,
+            )
+        try:
             try:
                 result = await Runner.run(
-                    agent,
+                    self._agent,
                     user_message,
                     session=session,
                     hooks=hooks,
@@ -293,30 +259,26 @@ class AgentRuntime:
                         }
                     )
                 raise
-            finally:
-                if agent is not self._agent:
-                    self._agent.instructions = original_instructions
-
-            output = result.final_output
-            if isinstance(output, str):
-                response = output.strip()
-            elif output is None:
-                response = ""
-            else:
-                response = str(output).strip()
-            if response:
-                try:
-                    self._chat_store.add_message(
-                        external_conversation_id=history_id,
-                        role="assistant",
-                        content=response,
-                        sender_id="assistant",
-                    )
-                except sqlite3.Error:
-                    LOGGER.exception("Failed to persist assistant message to database", exc_info=True)
-                except Exception:
-                    LOGGER.exception("Failed to persist assistant message with an unexpected error", exc_info=True)
-            return response
+        finally:
+            current_chat_id.reset(_chat_id_token)
+        output = result.final_output
+        if isinstance(output, str):
+            response = output.strip()
+        elif output is None:
+            response = ""
+        else:
+            response = str(output).strip()
+        if response:
+            try:
+                self._chat_store.add_message(
+                    external_conversation_id=history_id,
+                    role="assistant",
+                    content=response,
+                    sender_id="assistant",
+                )
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to persist assistant message", exc_info=True)
+        return response
 
     def search_history(self, chat_id: int, query: str, *, limit: int = 50) -> List[Dict[str, Any]]:
         history_id = self._history_id(chat_id)
@@ -326,23 +288,8 @@ class AgentRuntime:
                 external_conversation_id=history_id,
                 limit=limit,
             )
-        except sqlite3.Error:
-            LOGGER.exception("History search failed due to a database error", exc_info=True)
-            return []
-        except Exception:
-            LOGGER.exception("History search failed with an unexpected error", exc_info=True)
-            return []
-
-    def list_chat_senders(self, chat_id: int) -> List[str]:
-        """Return distinct sender_ids for user messages in a chat's history."""
-        history_id = self._history_id(chat_id)
-        try:
-            return self._chat_store.list_senders(external_conversation_id=history_id)
-        except sqlite3.Error:
-            LOGGER.exception("List chat senders failed due to a database error", exc_info=True)
-            return []
-        except Exception:
-            LOGGER.exception("List chat senders failed with an unexpected error", exc_info=True)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("History search failed", exc_info=True)
             return []
 
     def log_message(
@@ -366,10 +313,8 @@ class AgentRuntime:
                 metadata=metadata,
                 sender_id=sender_id,
             )
-        except sqlite3.Error:
-            LOGGER.exception("Failed to log message to database", exc_info=True)
-        except Exception:
-            LOGGER.exception("Failed to log message with an unexpected error", exc_info=True)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to log message", exc_info=True)
 
     def get_history_messages(
         self,
@@ -378,32 +323,17 @@ class AgentRuntime:
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
         limit: Optional[int] = None,
-        last_only: bool = False,
-        sender_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         history_id = self._history_id(chat_id)
         try:
-            if last_only and limit is not None and start is None and end is None:
-                return self._chat_store.get_last_messages(
-                    external_conversation_id=history_id,
-                    limit=limit,
-                    sender_id=sender_id,
-                )
-            messages = self._chat_store.get_messages_in_range(
+            return self._chat_store.get_messages_in_range(
                 external_conversation_id=history_id,
                 start=start,
                 end=end,
                 limit=limit,
             )
-            if sender_id is not None:
-                sid_str = str(sender_id)
-                return [m for m in messages if str(m.get("sender_id") or "") == sid_str]
-            return messages
-        except sqlite3.Error:
-            LOGGER.exception("History fetch failed due to a database error", exc_info=True)
-            return []
-        except Exception:
-            LOGGER.exception("History fetch failed with an unexpected error", exc_info=True)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("History fetch failed", exc_info=True)
             return []
 
     async def recap_history(
@@ -460,135 +390,11 @@ class AgentRuntime:
         try:
             result = await Runner.run(responder, prompt, session=None, max_turns=1)
             output = result.final_output
-        except sqlite3.Error:
-            LOGGER.exception("History QA failed due to a database error", exc_info=True)
-            return {"answer": "", "context": context}
-        except Exception:
-            LOGGER.exception("History QA failed with an unexpected error", exc_info=True)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("History QA failed", exc_info=True)
             return {"answer": "", "context": context}
         answer = output if isinstance(output, str) else ("" if output is None else str(output))
         return {"answer": answer.strip(), "context": context}
-
-    async def learn_user_style(
-        self,
-        chat_id: int,
-        sender_id: str,
-        *,
-        label: Optional[str] = None,
-        max_messages: Optional[int] = None,
-        min_messages: Optional[int] = None,
-        max_chars: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        effective_max_messages = max_messages or int(self._settings.style_learn_max_messages)
-        effective_min_messages = min_messages or int(self._settings.style_learn_min_messages)
-        effective_max_chars = max_chars or int(self._settings.style_learn_max_chars)
-        history_limit = max(effective_max_messages * 4, effective_max_messages + 20)
-        sender_id_str = str(sender_id)
-        messages = self.get_history_messages(
-            chat_id,
-            limit=history_limit,
-            last_only=True,
-            sender_id=sender_id_str,
-        )
-        filtered: list[Dict[str, Any]] = []
-        index_by_tg_id: dict[str, int] = {}
-        for message in messages:
-            role = message.get("role") or "user"
-            if role != "user":
-                continue
-            content = (message.get("content") or "").strip()
-            if not content:
-                continue
-            metadata = message.get("metadata") or {}
-            tg_id_val = None
-            if isinstance(metadata, dict):
-                tg_id_val = metadata.get("telegram_message_id")
-            key: str | None
-            if tg_id_val is not None:
-                key = f"tg:{tg_id_val}"
-            else:
-                mid = message.get("id")
-                key = f"id:{mid}" if mid is not None else None
-            if key is not None and key in index_by_tg_id:
-                filtered[index_by_tg_id[key]] = message
-            else:
-                if key is not None:
-                    index_by_tg_id[key] = len(filtered)
-                filtered.append(message)
-        if not filtered:
-            raise ValueError("No user messages found to learn from.")
-        if len(filtered) < effective_min_messages:
-            raise ValueError(
-                f"Not enough messages to learn style (found {len(filtered)}, need at least {effective_min_messages})."
-            )
-        if len(filtered) > effective_max_messages:
-            top_messages = filtered[-effective_max_messages:]
-        else:
-            top_messages = filtered
-        items: List[Dict[str, Any]] = []
-        sample_messages: List[str] = []
-        for message in top_messages:
-            text = (message.get("content") or "").strip()
-            if not text:
-                continue
-            items.append({"role": "user", "content": text})
-            sample_messages.append(text)
-        transcript = self._items_to_transcript(items, max_chars=effective_max_chars)
-        if not transcript.strip():
-            raise ValueError("User transcript is empty after preprocessing.")
-        instructions = (
-            "You are a style expert. Analyze the following messages from a user. "
-            "Create a concise system prompt that instructs an AI assistant on how to mimic this user's writing style, "
-            "including their tone, formality, language choice, use of emojis, and common phrases. "
-            "The prompt should be a direct instruction to the assistant. "
-            "Respond with only the generated system prompt and nothing else."
-        )
-        style_agent = Agent(
-            name="Style Learner",
-            instructions=instructions,
-            model=self._settings.openai_model,
-            model_settings=ModelSettings(temperature=self._settings.openai_temperature),
-            tools=[],
-        )
-        prompt = (
-            "Analyze these example messages and generate a system prompt to instruct an AI assistant.\n\n"
-            "Example messages (in chronological order):\n"
-            f"{transcript}\n\n"
-            "Respond with only the system prompt text."
-        )
-        try:
-            result = await Runner.run(style_agent, prompt, session=None, max_turns=1)
-            output = result.final_output
-        except Exception as exc:
-            LOGGER.exception("Style learning model call failed", exc_info=True)
-            raise RuntimeError(f"Style learning failed: {exc}") from exc
-        if isinstance(output, str):
-            style_prompt = output.strip()
-        elif output is None:
-            style_prompt = ""
-        else:
-            style_prompt = str(output).strip()
-        if not style_prompt:
-            raise RuntimeError("Style learning returned an empty response.")
-        analysis: Dict[str, Any] = {}
-        resolved_label = label or f"user-{sender_id_str}"
-        LOGGER.info(
-            "Learned style profile for chat_id=%s sender_id=%s label=%s (messages_used=%s)",
-            chat_id,
-            sender_id_str,
-            resolved_label,
-            len(sample_messages),
-        )
-        profile = self._style_store.upsert_profile(
-            chat_id=chat_id,
-            sender_id=sender_id_str,
-            label=resolved_label,
-            style_prompt=style_prompt,
-            analysis=analysis,
-            sample_messages=sample_messages[:5],
-            message_count=len(sample_messages),
-        )
-        return profile
 
     def _messages_to_transcript(self, messages: List[Dict[str, Any]], max_chars: int) -> str:
         items: List[Dict[str, Any]] = []
@@ -635,10 +441,8 @@ class AgentRuntime:
         try:
             await session.clear_session()
             await session.add_items([summary_item] + tail)
-        except sqlite3.Error:
-            LOGGER.exception("Failed to rewrite session history due to a database error", exc_info=True)
-        except Exception:
-            LOGGER.exception("Failed to rewrite session history with an unexpected error", exc_info=True)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to rewrite session history", exc_info=True)
 
     def _items_to_transcript(self, items: list[Dict[str, Any]], max_chars: int) -> str:
         segments: list[str] = []
@@ -740,13 +544,7 @@ class AgentRuntime:
                 result = clear()
                 if inspect.isawaitable(result):
                     await result
-            except sqlite3.Error:
-                LOGGER.exception(
-                    "Failed to clear session %s due to a database error",
-                    self._session_id(chat_id),
-                    exc_info=True,
-                )
-            except Exception:
+            except Exception:  # noqa: BLE001
                 LOGGER.exception("Failed to clear session %s", self._session_id(chat_id), exc_info=True)
         close = getattr(session, "close", None)
         if callable(close):
@@ -754,13 +552,7 @@ class AgentRuntime:
                 result = close()
                 if inspect.isawaitable(result):
                     await result
-            except sqlite3.Error:
-                LOGGER.exception(
-                    "Failed to close session %s due to a database error",
-                    self._session_id(chat_id),
-                    exc_info=True,
-                )
-            except Exception:
+            except Exception:  # noqa: BLE001
                 LOGGER.exception("Failed to close session %s", self._session_id(chat_id), exc_info=True)
 
     async def aclose(self) -> None:
@@ -771,17 +563,13 @@ class AgentRuntime:
                     result = close()
                     if inspect.isawaitable(result):
                         await result
-                except sqlite3.Error:
-                    LOGGER.exception("Failed to close session %s due to a database error", session, exc_info=True)
-                except Exception:
-                    LOGGER.exception("Failed to close session %s with an unexpected error", session, exc_info=True)
+                except Exception:  # noqa: BLE001
+                    LOGGER.exception("Failed to close session %s", session, exc_info=True)
         self._sessions.clear()
         try:
             self._chat_store.close()
-        except sqlite3.Error:
-            LOGGER.exception("Failed to close chat store due to a database error", exc_info=True)
-        except Exception:
-            LOGGER.exception("Failed to close chat store with an unexpected error", exc_info=True)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to close chat store", exc_info=True)
 
 
 __all__ = ["AgentRuntime"]
