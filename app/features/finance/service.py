@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import List, Sequence
 
-from app.finance_client import DailyBar
+from app.features.finance.client import DailyBar
 
 _SPARKLINE_CHARS = ".,-~=*#@"
 

@@ -5,6 +5,7 @@ import logging
 from typing import Tuple
 
 from PIL import Image
+
 LOGGER = logging.getLogger(__name__)
 
 

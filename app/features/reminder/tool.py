@@ -9,16 +9,13 @@ import dateparser
 from agents import function_tool
 from pydantic import Field
 
-from app.storage.reminder_store import ReminderStore
+from app.features.reminder.store import ReminderStore
 
 if TYPE_CHECKING:
     from telegram.ext import Application
 
 LOGGER = logging.getLogger(__name__)
 
-# Set by AgentRuntime._run before each Runner.run call so the tool knows
-# which Telegram chat to deliver the reminder to without exposing chat_id
-# as an LLM-facing parameter.
 current_chat_id: ContextVar[int | None] = ContextVar("current_chat_id", default=None)
 
 

@@ -18,22 +18,14 @@ from agents import ModelSettings
 from openai import AsyncOpenAI
 
 from app.config import Settings
-from app.progress import NullProgressDispatcher, ProgressDispatcher
-from app.progress_hooks import ProgressHooks
-from app.finance_client import AlphaVantageClient, YFinanceClient
+from app.features.finance import AlphaVantageClient, YFinanceClient, create_disabled_finance_tool, create_stock_trend_tool
+from app.features.memory import create_search_memory_tool
+from app.features.reminder import current_chat_id
+from app.features.vision import create_disabled_vision_tool, create_vision_tool
+from app.features.web_search import WebSearchClient, create_disabled_web_search_tool, create_ollama_web_search_tool
+from app.progress import NullProgressDispatcher, ProgressDispatcher, ProgressHooks
 from app.prompt import get_agent_instructions
 from app.storage.chat_store import ChatStore
-from app.tools import (
-    create_disabled_finance_tool,
-    create_disabled_vision_tool,
-    create_disabled_web_search_tool,
-    create_ollama_web_search_tool,
-    create_stock_trend_tool,
-    create_vision_tool,
-)
-from app.tools.memory import create_search_memory_tool
-from app.tools.reminder import current_chat_id
-from app.web_search_client import WebSearchClient
 
 LOGGER = logging.getLogger(__name__)
 

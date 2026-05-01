@@ -16,10 +16,10 @@ from telegram.error import BadRequest
 
 from app.agent_runtime import AgentRuntime
 from app.config import Settings
-from app.asr import ASRService, TranscriptionResult, create_asr_service
+from app.features.asr import ASRService, TranscriptionResult, create_asr_service
+from app.features.asr.utils import convert_audio_to_wav
+from app.features.reminder import ReminderStore, parse_remind_at, create_reminder_tool, schedule_reminder_job
 from app.progress import ProgressDispatcher, ProgressEvent
-from app.storage.reminder_store import ReminderStore, parse_remind_at
-from app.tools.reminder import create_reminder_tool, schedule_reminder_job
 
 LOGGER = logging.getLogger(__name__)
 
@@ -100,15 +100,6 @@ def _truncate(text: str, limit: int = 160) -> str:
         return text
     return f"{text[: limit - 3]}..."
 
-
-def _escape_markdown_url(url: str) -> str:
-    """Escape characters in URLs that break Telegram Markdown parsing."""
-    return (
-        url.replace("\\", "")
-        .replace(")", r"\)")
-        .replace("(", r"\(")
-        .replace("_", r"\_")
-    )
 
 
 _BOLD_PATTERN = re.compile(r"\*\*(.+?)\*\*")
@@ -650,28 +641,6 @@ def _parse_whitelist(raw: str | None) -> Set[int]:
     return items
 
 
-async def _convert_audio_to_wav(ffmpeg_path: str, source: Path, target: Path) -> None:
-    process = await asyncio.create_subprocess_exec(
-        ffmpeg_path,
-        "-y",
-        "-i",
-        str(source),
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        str(target),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await process.communicate()
-    if process.returncode != 0:
-        stderr_text = (stderr.decode("utf-8", errors="ignore") or "").strip()
-        raise RuntimeError(f"ffmpeg failed with exit code {process.returncode}: {stderr_text}")
-    if not target.exists():
-        raise RuntimeError("ffmpeg did not produce an output file.")
-
-
 async def _transcribe_voice_note(voice: Voice, ffmpeg_path: str, asr_service: ASRService) -> TranscriptionResult:
     telegram_file = await voice.get_file()
     with tempfile.TemporaryDirectory(prefix="cg-voice-") as temp_dir:
@@ -679,7 +648,7 @@ async def _transcribe_voice_note(voice: Voice, ffmpeg_path: str, asr_service: AS
         source_path = temp_dir_path / "input"
         target_path = temp_dir_path / "converted.wav"
         await telegram_file.download_to_drive(custom_path=str(source_path))
-        await _convert_audio_to_wav(ffmpeg_path, source_path, target_path)
+        await convert_audio_to_wav(ffmpeg_path, source_path, target_path)
         result = await asyncio.to_thread(asr_service.transcribe, str(target_path))
     return result
 

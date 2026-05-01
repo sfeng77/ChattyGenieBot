@@ -11,7 +11,7 @@ from agents.lifecycle import RunHooks
 from agents.run_context import RunContextWrapper, TContext
 from agents.tool import Tool
 
-from app.progress import ProgressDispatcher, ProgressEvent
+from app.progress.dispatcher import ProgressDispatcher, ProgressEvent
 
 LOGGER = logging.getLogger(__name__)
 

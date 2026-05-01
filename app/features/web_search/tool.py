@@ -6,7 +6,7 @@ from typing import Any, Dict, Annotated
 from agents import function_tool
 from pydantic import Field
 
-from app.web_search_client import WebSearchClient
+from app.features.web_search.client import WebSearchClient
 
 LOGGER = logging.getLogger(__name__)
 

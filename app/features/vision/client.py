@@ -69,9 +69,10 @@ async def analyze_image(
                 max_output_tokens=max_output_tokens,
             )
         except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Vision model request failed", exc_info=True)        
+            LOGGER.exception("Vision model request failed", exc_info=True)
 
     return fallback_text
+
 
 async def _run_chat_fallback(
     *,

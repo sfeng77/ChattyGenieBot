@@ -6,11 +6,12 @@ from typing import Annotated, Dict, Optional
 
 import httpx
 from agents import function_tool
+from openai import NotFoundError
 from pydantic import Field
 
 from app.config import Settings
-from app.vision_client import analyze_image
-from app.vision_image import prepare_image
+from app.features.vision.client import analyze_image
+from app.features.vision.image import prepare_image
 
 LOGGER = logging.getLogger(__name__)
 

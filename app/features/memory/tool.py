@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Annotated, Optional
 from agents import function_tool
 from pydantic import Field
 
-from app.tools.reminder import current_chat_id
+from app.features.reminder.tool import current_chat_id
 
 if TYPE_CHECKING:
     from app.storage.chat_store import ChatStore

@@ -8,8 +8,8 @@ from typing import Annotated, Dict, List, Optional
 from agents import function_tool
 from pydantic import Field
 
-from app.finance_client import FinanceClient
-from app.services import trend
+from app.features.finance.client import FinanceClient
+from app.features.finance import service
 
 LOGGER = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ def create_stock_trend_tool(
                 "provider": provider_name,
             }
 
-        window = trend.select_window(bars, window_days)
+        window = service.select_window(bars, window_days)
         if not window.has_enough_data:
             return {
                 "symbol": ticker,
@@ -120,12 +120,12 @@ def create_stock_trend_tool(
             }
 
         price = window.bars[-1].close
-        change_pct = trend.percent_change(window)
-        slope_value = trend.slope(window)
-        volatility = trend.volatility_pct(window)
-        high, low = trend.high_low(window)
-        spark = trend.sparkline(window)
-        series = trend.compact_series(window)
+        change_pct = service.percent_change(window)
+        slope_value = service.slope(window)
+        volatility = service.volatility_pct(window)
+        high, low = service.high_low(window)
+        spark = service.sparkline(window)
+        series = service.compact_series(window)
         as_of = window.bars[-1].date.strftime("%Y-%m-%d")
 
         return {
