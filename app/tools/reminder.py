@@ -71,10 +71,10 @@ def create_reminder_tool(store: ReminderStore, application: "Application"):
         now = datetime.now(timezone.utc)
         parsed = dateparser.parse(
             time_expression,
+            languages=["zh", "en"],
             settings={
                 "PREFER_DATES_FROM": "future",
                 "RETURN_AS_TIMEZONE_AWARE": True,
-                "LANGUAGES": ["zh", "en"],
             },
         )
         if parsed is None:

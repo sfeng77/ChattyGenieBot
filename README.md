@@ -66,14 +66,11 @@ FFMPEG_PATH=ffmpeg
 MAX_AUDIO_DURATION_SECONDS=45
 MAX_AUDIO_SIZE_MB=20
 TRANSCRIBE_ECHO_ENABLED=true
-STYLE_LEARN_MAX_MESSAGES=200
-STYLE_LEARN_MIN_MESSAGES=20
-STYLE_LEARN_MAX_CHARS=8000
 ```
 
 `OPENAI_API_BASE` defaults to the local Ollama OpenAI-compatible endpoint. Set `WEB_SEARCH_ENABLED=true` to expose the `web_search` tool; the Ollama API key is required and is sent as `Authorization: Bearer <OLLAMA_API_KEY>`.
 `SESSIONS_DB_PATH` may be set if you need a custom storage location. By default, session state lives at `data/sessions/sessions.db`.
-`CHAT_HISTORY_DB_PATH` points to the persistent conversational store (defaults to `data/history/chat_history.db`). This database keeps every turn, powers keyword search via FTS5, and feeds recap/QA helpers, and now also stores learned style profiles.
+`CHAT_HISTORY_DB_PATH` points to the persistent conversational store (defaults to `data/history/chat_history.db`). This database keeps every turn, powers keyword search via FTS5, and feeds recap/QA helpers.
 Enable `FINANCE_ENABLED=true` with an Alpha Vantage API key to expose the `stock_trend` tool for 7-day price trends.
 Enable `VISION_ENABLED=true` to let the agent analyze Telegram photos with the configured vision model.
 Use `PROGRESS_EDIT_THROTTLE_MS`, `PROGRESS_KEEP_TIMELINE`, and `PROGRESS_TOOL_RESULT_MAX_CHARS` to tune how often Telegram messages are updated and how much tool output is surfaced. Define `WHITELISTED_USER_IDS` as a comma-separated list of Telegram user IDs to restrict access (leave empty to allow everyone). Use `HISTORY_PRUNE_ENABLED`, `HISTORY_PRUNE_THRESHOLD_ITEMS`, `HISTORY_KEEP_LAST_ITEMS`, and `HISTORY_SUMMARY_MAX_CHARS` to control automatic summarization of long conversations.
@@ -88,7 +85,6 @@ Commands:
 - `/help` - command reference
 - `/reset` - clear the conversation memory for the current chat
 - `/progress` - toggle live progress updates
-- `/learn` - learn a user's writing style from recent chat history (reply to a user or run directly to learn your own style)
 
 ## Voice input
 - Telegram voice notes are transcribed locally with faster-whisper (default `large-v3` on CUDA) and echoed back as `[username] 说: ...`.
