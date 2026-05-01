@@ -81,10 +81,10 @@ python main.py
 ```
 
 Commands:
-- `/start` - welcome message
 - `/help` - command reference
-- `/reset` - clear the conversation memory for the current chat
+- `/clear` - clear the conversation memory for the current chat
 - `/progress` - toggle live progress updates
+- `/recap` - summarize last 1h/1d of this chat
 
 ## Voice input
 - Telegram voice notes are transcribed locally with faster-whisper (default `large-v3` on CUDA) and echoed back as `[username] 说: ...`.

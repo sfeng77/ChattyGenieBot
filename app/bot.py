@@ -201,25 +201,6 @@ def require_authorized(fn: HandlerFunc) -> HandlerFunc:
 
 
 @require_authorized
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    if message is None:
-        return
-    LOGGER.info("/start invoked by chat_id=%s", message.chat_id)
-    # Log the command
-    runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
-    from_user = message.from_user
-    runtime.log_message(
-        message.chat_id,
-        content=message.text or "/start",
-        sender_id=str(from_user.id) if from_user and from_user.id is not None else None,
-        created_at=message.date,
-        metadata={"telegram_message_id": message.id},
-    )
-    await message.reply_text("Hi! I am Agent Mushroom. Send me a message and I will reply using OpenAI Agents.")
-
-
-@require_authorized
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
@@ -237,26 +218,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     await message.reply_text(
         "Commands:\n"
-        "/start - welcome message\n"
         "/help - command reference\n"
-        "/reset - clear conversation memory\n"
+        "/clear - clear conversation memory\n"
         "/progress - toggle live progress updates for this chat\n"
         "/recap - summarize last 1h/1d of this chat"
     )
 
 
 @require_authorized
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if message is None:
         return
-    LOGGER.info("/reset invoked by chat_id=%s", message.chat_id)
+    LOGGER.info("/clear invoked by chat_id=%s", message.chat_id)
     # Log the command
     runtime: AgentRuntime = context.application.bot_data[AGENT_RUNTIME_KEY]
     from_user = message.from_user
     runtime.log_message(
         message.chat_id,
-        content=message.text or "/reset",
+        content=message.text or "/clear",
         sender_id=str(from_user.id) if from_user and from_user.id is not None else None,
         created_at=message.date,
         metadata={"telegram_message_id": message.id},
@@ -979,9 +959,8 @@ def build_application(settings: Settings) -> Application:
     application.bot_data[FFMPEG_PATH_KEY] = ffmpeg_path_resolved
     application.bot_data[REMINDER_STORE_KEY] = reminder_store
 
-    application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("reset", reset))
+    application.add_handler(CommandHandler("clear", clear_command))
     application.add_handler(CommandHandler("progress", toggle_progress))
     application.add_handler(CommandHandler("recap", recap_command))
     application.add_handler(CallbackQueryHandler(handle_recap_callback, pattern=r"^recap:(1h|1d)$"))

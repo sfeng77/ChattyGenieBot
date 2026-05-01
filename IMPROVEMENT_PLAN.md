@@ -8,9 +8,8 @@ Before adding anything, it's worth being precise about what you have:
 - **Per-chat SQLite session memory** with auto-prune/summarization when sessions grow long
 - **Long-term chat history** in a separate FTS5-backed SQLite DB — supports keyword search, recap, Q&A grounded in past turns
 - **Tools** (all optional/feature-flagged): web search (Ollama), stock trends (Alpha Vantage), image analysis (Ollama vision), voice transcription (faster-whisper local)
-- **Style learning** (`/learn`) — analyzes a user's messages and stores a behavior/tone profile
 - **RAG infrastructure** in `app/rag/` — Ollama embeddings + numpy vector store for indexing markdown/text docs
-- Commands: `/start`, `/help`, `/reset`, `/progress`, `/learn`, `/recap`
+- Commands: `/help`, `/clear`, `/progress`, `/recap`
 
 The architecture is clean and extensible. Every new capability follows the same pattern:
 1. Create a tool factory in `app/tools/<name>.py`
