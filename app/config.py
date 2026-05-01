@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     log_dir: Path = Field(DEFAULT_LOG_DIR, alias="LOG_DIR")
     log_file_path: Path = Field(DEFAULT_LOG_FILE_PATH, alias="LOG_FILE_PATH")
     finance_enabled: bool = Field(False, alias="FINANCE_ENABLED")
-    finance_provider: str = Field("alpha_vantage", alias="FINANCE_PROVIDER")
+    finance_provider: str = Field("yfinance", alias="FINANCE_PROVIDER")
     finance_api_key: str | None = Field(None, alias="FINANCE_API_KEY")
     finance_timeout: float = Field(10.0, alias="FINANCE_TIMEOUT")
     finance_default_window_days: int = Field(7, alias="FINANCE_WINDOW_DAYS")

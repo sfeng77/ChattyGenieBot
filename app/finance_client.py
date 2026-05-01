@@ -96,4 +96,43 @@ class AlphaVantageClient:
         return bars
 
 
-__all__ = ["AlphaVantageClient", "DailyBar", "FinanceClient"]
+class YFinanceClient:
+    """Adapter for yfinance (Yahoo Finance). No API key required."""
+
+    def __init__(self, timeout: float = 10.0) -> None:
+        self._timeout = timeout
+
+    async def daily_bars(self, symbol: str, limit: int = 100) -> List[DailyBar]:
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._fetch, symbol, limit)
+
+    def _fetch(self, symbol: str, limit: int) -> List[DailyBar]:
+        import yfinance as yf
+
+        period = "3mo" if limit <= 90 else "1y"
+        hist = yf.Ticker(symbol).history(period=period)
+        if hist.empty:
+            return []
+        bars: List[DailyBar] = []
+        for date, row in hist.iterrows():
+            bars.append(
+                DailyBar(
+                    symbol=symbol.upper(),
+                    date=date.to_pydatetime().replace(tzinfo=None),
+                    open=float(row["Open"]),
+                    high=float(row["High"]),
+                    low=float(row["Low"]),
+                    close=float(row["Close"]),
+                    volume=int(row["Volume"]),
+                )
+            )
+        bars.sort(key=lambda b: b.date, reverse=True)
+        if limit and len(bars) > limit:
+            bars = bars[:limit]
+        LOGGER.info("Fetched %s yfinance bars for %s", len(bars), symbol)
+        return bars
+
+
+__all__ = ["AlphaVantageClient", "YFinanceClient", "DailyBar", "FinanceClient"]

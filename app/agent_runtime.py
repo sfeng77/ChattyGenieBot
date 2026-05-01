@@ -20,7 +20,7 @@ from openai import AsyncOpenAI
 from app.config import Settings
 from app.progress import NullProgressDispatcher, ProgressDispatcher
 from app.progress_hooks import ProgressHooks
-from app.finance_client import AlphaVantageClient
+from app.finance_client import AlphaVantageClient, YFinanceClient
 from app.prompt import get_agent_instructions
 from app.storage.chat_store import ChatStore
 from app.tools import (
@@ -139,7 +139,10 @@ class AgentRuntime:
 
     def _build_finance_tool(self):
         provider = (self._settings.finance_provider or "").lower()
-        if provider == "alpha_vantage":
+        if provider == "yfinance":
+            client = YFinanceClient(timeout=self._settings.finance_timeout)
+            provider_label = "yfinance"
+        elif provider == "alpha_vantage":
             api_key = self._settings.finance_api_key
             if not api_key:
                 raise ValueError("FINANCE_API_KEY must be set to use Alpha Vantage")
