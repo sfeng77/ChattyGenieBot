@@ -3,6 +3,7 @@ import re
 
 import inspect
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,8 @@ from app.prompt import CURRENT_TIME_PLACEHOLDER, current_datetime_line, get_agen
 from app.storage.chat_store import ChatStore
 
 LOGGER = logging.getLogger(__name__)
+
+_AUTO_SUMMARY_PREFIX = "Earlier conversation summary (auto-generated):"
 
 
 class AgentRuntime:
@@ -120,6 +123,23 @@ class AgentRuntime:
             tools=tools,
         )
         self._sessions: Dict[int, SQLiteSession] = {}
+        self._last_activity: Dict[int, float] = {}
+        self._ensure_session_activity_table()
+
+    def _ensure_session_activity_table(self) -> None:
+        try:
+            conn = self._chat_store.get_connection()
+            with conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS session_activity (
+                        chat_id INTEGER PRIMARY KEY,
+                        last_ts REAL NOT NULL
+                    )
+                    """
+                )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to create session_activity table")
 
     def get_db_connection(self):
         """Return the shared SQLite connection for additional stores."""
@@ -180,6 +200,67 @@ class AgentRuntime:
             self._sessions[chat_id] = session
         return session
 
+    def _get_last_activity(self, chat_id: int) -> Optional[float]:
+        if chat_id in self._last_activity:
+            return self._last_activity[chat_id]
+        try:
+            conn = self._chat_store.get_connection()
+            row = conn.execute(
+                "SELECT last_ts FROM session_activity WHERE chat_id = ?", (chat_id,)
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to read session activity for chat_id=%s", chat_id, exc_info=True)
+            return None
+        if row is None:
+            return None
+        last_ts = float(row[0])
+        self._last_activity[chat_id] = last_ts
+        return last_ts
+
+    def _record_activity(self, chat_id: int) -> None:
+        now_ts = time.time()
+        self._last_activity[chat_id] = now_ts
+        try:
+            conn = self._chat_store.get_connection()
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO session_activity(chat_id, last_ts) VALUES (?, ?)
+                    ON CONFLICT(chat_id) DO UPDATE SET last_ts = excluded.last_ts
+                    """,
+                    (chat_id, now_ts),
+                )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to persist session activity for chat_id=%s", chat_id, exc_info=True)
+
+    async def _maybe_expire_session(self, chat_id: int) -> None:
+        expiry_hours = self._settings.session_idle_expiry_hours
+        if expiry_hours <= 0:
+            return
+        last_ts = self._get_last_activity(chat_id)
+        if last_ts is None:
+            return
+        idle_hours = (time.time() - last_ts) / 3600.0
+        if idle_hours <= expiry_hours:
+            return
+        LOGGER.info("Session chat-%s expired after %.1fh idle; starting fresh.", chat_id, idle_hours)
+        await self.reset(chat_id)
+        session = self._get_session(chat_id)
+        try:
+            await session.add_items(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "(New session started after inactivity. Use search_memory for anything "
+                            "from earlier conversations.)"
+                        ),
+                    }
+                ]
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to seed fresh session for chat_id=%s", chat_id, exc_info=True)
+
     async def run_message(self, chat_id: int, user_message: str, *, sender_id: str | None = None, log_user: bool = True) -> str:
         return await self._run(
             chat_id,
@@ -220,6 +301,8 @@ class AgentRuntime:
         sender_id: str | None = None,
         log_user: bool = True,
     ) -> str:
+        await self._maybe_expire_session(chat_id)
+        self._record_activity(chat_id)
         session = self._get_session(chat_id)
         _chat_id_token = current_chat_id.set(chat_id)
         if self._settings.history_prune_enabled:
@@ -268,6 +351,10 @@ class AgentRuntime:
                 raise
         finally:
             current_chat_id.reset(_chat_id_token)
+        try:
+            await self._maybe_trim_tool_outputs(session)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Tool-output trimming failed", exc_info=True)
         output = result.final_output
         if isinstance(output, str):
             response = output.strip()
@@ -435,6 +522,12 @@ class AgentRuntime:
             return text[-max_chars:]
         return text
 
+    def _is_auto_summary(self, item: Dict[str, Any]) -> bool:
+        if not isinstance(item, dict) or item.get("role") != "system":
+            return False
+        content = item.get("content")
+        return isinstance(content, str) and content.startswith(_AUTO_SUMMARY_PREFIX)
+
     async def _maybe_prune_session(self, session: SQLiteSession) -> None:
         keep_last = max(1, int(self._settings.history_keep_last_items))
         threshold = max(keep_last + 1, int(self._settings.history_prune_threshold_items))
@@ -443,16 +536,70 @@ class AgentRuntime:
             return
         older = items[:-keep_last]
         tail = items[-keep_last:]
-        transcript = self._items_to_transcript(older, max_chars=self._settings.history_summary_max_chars * 4)
+
+        # Summarizing a previous auto-summary along with the older items would let
+        # ancient topics survive indefinitely through summaries-of-summaries; only
+        # ever carry forward the single most recent previous summary verbatim, and
+        # summarize the rest fresh each time.
+        previous_summaries = [item for item in older if self._is_auto_summary(item)]
+        non_summary_older = [item for item in older if not self._is_auto_summary(item)]
+        discarded = max(0, len(previous_summaries) - 1)
+        if discarded:
+            LOGGER.info("Pruning: discarding %d stale auto-summary item(s), keeping only the most recent", discarded)
+        latest_previous_summary = previous_summaries[-1:]
+
+        transcript = self._items_to_transcript(non_summary_older, max_chars=self._settings.history_summary_max_chars * 4)
         summary = await self._summarize_transcript(transcript, max_chars=self._settings.history_summary_max_chars)
         if not summary:
             summary = self._fallback_summary(transcript, self._settings.history_summary_max_chars)
-        summary_item: Dict[str, Any] = {"role": "system", "content": f"Earlier conversation summary (auto-generated):\n{summary}"}
+        summary_item: Dict[str, Any] = {"role": "system", "content": f"{_AUTO_SUMMARY_PREFIX}\n{summary}"}
         try:
             await session.clear_session()
-            await session.add_items([summary_item] + tail)
+            await session.add_items(latest_previous_summary + [summary_item] + tail)
         except Exception:  # noqa: BLE001
             LOGGER.exception("Failed to rewrite session history", exc_info=True)
+
+    def _trim_tool_output_item(self, item: Any, max_chars: int) -> Optional[Dict[str, Any]]:
+        """Return a trimmed copy of a `function_call_output` item if its `output`
+        exceeds `max_chars`, else None (not a recognized oversized tool-output item).
+
+        Handles the item shape defensively: skip (return None) anything that
+        isn't exactly a dict-shaped function_call_output with a string output,
+        rather than risk corrupting an item we don't fully understand.
+        """
+        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+            return None
+        output = item.get("output")
+        if not isinstance(output, str) or len(output) <= max_chars:
+            return None
+        marker = "...[truncated for history]"
+        trimmed_output = output[: max(0, max_chars - len(marker))] + marker
+        return {**item, "output": trimmed_output}
+
+    async def _maybe_trim_tool_outputs(self, session: SQLiteSession) -> None:
+        """Shrink oversized tool-call results already written to `session` so
+        future turns don't keep re-sending heavy payloads (e.g. full web_search
+        JSON) as context. The model has already seen the untrimmed result in
+        the turn that used it — this only affects what later turns see.
+        """
+        max_chars = self._settings.session_tool_result_max_chars
+        if max_chars <= 0:
+            return
+        items = await session.get_items()
+        rewritten: List[Any] = []
+        trimmed_count = 0
+        for item in items:
+            trimmed = self._trim_tool_output_item(item, max_chars)
+            if trimmed is not None:
+                rewritten.append(trimmed)
+                trimmed_count += 1
+            else:
+                rewritten.append(item)
+        if not trimmed_count:
+            return
+        LOGGER.info("Trimmed %d oversized tool-output item(s) in session history", trimmed_count)
+        await session.clear_session()
+        await session.add_items(rewritten)
 
     def _items_to_transcript(self, items: list[Dict[str, Any]], max_chars: int) -> str:
         segments: list[str] = []
