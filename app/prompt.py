@@ -1,5 +1,8 @@
 """Agent instructions for Agent Mushroom."""
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 _BASE_INSTRUCTIONS = (
     "You are Agent Mushroom, a helpful assistant that answers user questions clearly and concisely. "
     "Always respond in the same language as the user. "
@@ -53,6 +56,18 @@ _MEMORY_SUFFIX = (
 )
 
 
+def current_datetime_line(tz_name: str) -> str:
+    """Return a line grounding the agent in the current date/time for `tz_name`."""
+    now = datetime.now(ZoneInfo(tz_name))
+    formatted = now.strftime("%Y-%m-%d %H:%M (%A, %Z)")
+    return (
+        f"Current date and time: {formatted}. Always use this as 'today' when "
+        "answering time-sensitive questions. If search results or tool outputs "
+        "contain dates, interpret them relative to this date and prefer the "
+        "most recent information; ignore stale results."
+    )
+
+
 def get_agent_instructions(
     web_search_available: bool,
     finance_tool_available: bool,
@@ -68,4 +83,4 @@ def get_agent_instructions(
     return _BASE_INSTRUCTIONS + " ".join(suffixes)
 
 
-__all__ = ["get_agent_instructions"]
+__all__ = ["get_agent_instructions", "current_datetime_line"]

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 
 import inspect
 import logging
@@ -24,7 +25,7 @@ from app.features.reminder import current_chat_id
 from app.features.vision import create_disabled_vision_tool, create_vision_tool
 from app.features.web_search import WebSearchClient, create_disabled_web_search_tool, create_ollama_web_search_tool
 from app.progress import NullProgressDispatcher, ProgressDispatcher, ProgressHooks
-from app.prompt import get_agent_instructions
+from app.prompt import current_datetime_line, get_agent_instructions
 from app.storage.chat_store import ChatStore
 
 LOGGER = logging.getLogger(__name__)
@@ -102,10 +103,14 @@ class AgentRuntime:
             )
             self._vision_tool = create_disabled_vision_tool(message=notice)
             tools.append(self._vision_tool)
-        instructions = get_agent_instructions(web_search_available, finance_available, vision_available)
+        static_instructions = get_agent_instructions(web_search_available, finance_available, vision_available)
+
+        def _dynamic_instructions(ctx, agent) -> str:  # noqa: ANN001, ARG001
+            return f"{current_datetime_line(self._settings.agent_timezone)}\n\n{static_instructions}"
+
         self._agent = Agent(
             name="Agent Mushroom",
-            instructions=instructions,
+            instructions=_dynamic_instructions,
             model=settings.openai_model,
             model_settings=ModelSettings(temperature=settings.openai_temperature, extra_body={"think": False}),
             tools=tools,
@@ -266,6 +271,9 @@ class AgentRuntime:
             response = ""
         else:
             response = str(output).strip()
+        # Strip <think>...</think> blocks from reasoning models
+        import re
+        response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
         if response:
             try:
                 self._chat_store.add_message(

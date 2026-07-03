@@ -1,0 +1,166 @@
+[
+  {
+    "id": "select_01_stock_basic",
+    "category": "tool_selection",
+    "input": "帮我看看NVDA这个月的走势",
+    "expected_tools": ["stock_trend"],
+    "forbidden_tools": ["web_search"],
+    "expected_params": {"stock_trend": {"symbol": "NVDA"}}
+  },
+  {
+    "id": "select_02_company_news_not_stock",
+    "category": "tool_selection",
+    "input": "特斯拉最近有什么新闻?",
+    "expected_tools": ["web_search"],
+    "forbidden_tools": ["stock_trend"]
+  },
+  {
+    "id": "select_03_ambiguous_company",
+    "category": "tool_selection",
+    "input": "苹果股价最近怎么样",
+    "expected_tools": ["stock_trend"],
+    "expected_params": {"stock_trend": {"symbol": "AAPL"}}
+  },
+  {
+    "id": "select_04_reminder",
+    "category": "tool_selection",
+    "input": "明天早上9点提醒我给车做保养",
+    "expected_tools": ["set_reminder"],
+    "forbidden_tools": ["web_search", "stock_trend"]
+  },
+  {
+    "id": "select_05_memory_recall",
+    "category": "tool_selection",
+    "input": "我们之前聊过的那个日本旅行计划,你还记得吗?",
+    "expected_tools": ["search_memory"],
+    "forbidden_tools": ["web_search"]
+  },
+  {
+    "id": "select_06_current_info",
+    "category": "tool_selection",
+    "input": "What's the weather like in Kirkland today?",
+    "expected_tools": ["web_search"]
+  },
+  {
+    "id": "param_01_ticker_extraction",
+    "category": "param_accuracy",
+    "input": "微软过去两周的股价趋势如何?",
+    "expected_tools": ["stock_trend"],
+    "expected_params": {"stock_trend": {"symbol": "MSFT", "days": [14, "14"]}}
+  },
+  {
+    "id": "param_02_search_query_language",
+    "category": "param_accuracy",
+    "input": "search for the latest Destiny 2 patch notes",
+    "expected_tools": ["web_search"],
+    "expected_params": {"web_search": {}},
+    "note": "params checked loosely; mainly verifies the call is well-formed"
+  },
+  {
+    "id": "param_03_reminder_fields",
+    "category": "param_accuracy",
+    "input": "remind me in 2 hours to check the training run",
+    "expected_tools": ["set_reminder"],
+    "expected_params": {"set_reminder": {}},
+    "note": "add stricter time_expression checks once you see typical outputs"
+  },
+  {
+    "id": "negative_01_smalltalk",
+    "category": "negative",
+    "input": "哈哈今天心情不错,你呢?",
+    "expected_tools": [],
+    "forbidden_tools": ["web_search", "stock_trend", "set_reminder", "vision_analyze"]
+  },
+  {
+    "id": "negative_02_knowledge",
+    "category": "negative",
+    "input": "用一句话解释什么是二分查找",
+    "expected_tools": [],
+    "forbidden_tools": ["web_search", "stock_trend"]
+  },
+  {
+    "id": "negative_03_coding",
+    "category": "negative",
+    "input": "写一个Python函数,把列表里的字符串按长度排序",
+    "expected_tools": [],
+    "forbidden_tools": ["web_search"]
+  },
+  {
+    "id": "multi_01_stock_plus_news",
+    "category": "multi_step",
+    "input": "帮我查一下AMD最近30天的走势,再搜一下它最近的新闻",
+    "expected_tools": ["stock_trend", "web_search"],
+    "expected_params": {"stock_trend": {"symbol": "AMD"}}
+  },
+  {
+    "id": "multi_02_search_then_remind",
+    "category": "multi_step",
+    "input": "查一下Monument of Triumph这周的挑战是什么,然后提醒我今晚8点上线打",
+    "expected_tools": ["web_search", "set_reminder"]
+  },
+  {
+    "id": "recover_01_stock_error",
+    "category": "error_recovery",
+    "input": "看看GOOG最近的走势",
+    "expected_tools": ["stock_trend"],
+    "mock_responses": {
+      "stock_trend": {"error": "Rate limit exceeded, please retry later."}
+    },
+    "note": "passes if agent still responds gracefully after the tool error"
+  },
+  {
+    "id": "recover_02_empty_search",
+    "category": "error_recovery",
+    "input": "搜一下asdkjhqwe12333这个东西是什么",
+    "expected_tools": ["web_search"],
+    "mock_responses": {
+      "web_search": {"response": {"query": "asdkjhqwe12333", "results": [], "count": 0}}
+    },
+    "note": "agent should admit nothing was found instead of hallucinating"
+  },
+  {
+    "id": "temporal_01_weather_stale_vs_fresh",
+    "category": "temporal_grounding",
+    "input": "西雅图今天天气怎么样",
+    "expected_tools": ["web_search"],
+    "mock_responses": {
+      "web_search": {
+        "response": {
+          "query": "西雅图今天天气",
+          "results": [
+            {
+              "title": "Seattle Weather - March 6",
+              "url": "https://example.com/old-weather",
+              "snippet": "March 6: rainy, high 48F, low 40F. 3月6日:小雨,最高温48华氏度。"
+            },
+            {
+              "title": "Seattle Weather - {{TODAY}}",
+              "url": "https://example.com/current-weather",
+              "snippet": "{{TODAY}}: sunny, high 75F, low 58F. {{TODAY_CN}}:晴,最高温75华氏度。"
+            }
+          ],
+          "count": 2
+        }
+      }
+    },
+    "response_must_not_contain": ["3月6", "March 6"],
+    "note": "two mock results, one stale one current; agent must prefer the current one and not cite the stale date"
+  },
+  {
+    "id": "temporal_02_what_day_is_it",
+    "category": "temporal_grounding",
+    "input": "今天几号?星期几?",
+    "expected_tools": [],
+    "forbidden_tools": ["web_search"],
+    "response_must_contain": [["{{TODAY_CN}}", "{{TODAY}}"]],
+    "note": "must answer from the injected current-datetime instructions, not by searching"
+  },
+  {
+    "id": "temporal_03_relative_date_math",
+    "category": "temporal_grounding",
+    "input": "下周三是几号?",
+    "expected_tools": [],
+    "response_must_contain": [["{{NEXT_WEDNESDAY_CN}}", "{{NEXT_WEDNESDAY}}"]],
+    "note": "requires computing next Wednesday's date relative to the injected current date"
+  }
+]
