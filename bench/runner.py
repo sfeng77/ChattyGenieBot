@@ -75,7 +75,42 @@ def render_task_templates(tasks: List[Dict[str, Any]], tz_name: str) -> List[Dic
     return [_substitute_placeholders(task, mapping) for task in tasks]
 
 
-def build_runtime(tmp_dir: Path, model_override: str | None) -> AgentRuntime:
+def _seed_items_from_turns(turns: List[List[str]]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for user_text, assistant_text in turns:
+        items.append({"role": "user", "content": user_text})
+        items.append({"role": "assistant", "content": assistant_text})
+    return items
+
+
+def _seed_items_from_generate(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build filler turns locally from simple templates — no model calls."""
+    topics = spec.get("topics", [])
+    pairs_per_topic = int(spec.get("pairs_per_topic", 0))
+    items: List[Dict[str, Any]] = []
+    for topic in topics:
+        for i in range(1, pairs_per_topic + 1):
+            items.append({"role": "user", "content": f"关于{topic}的问题 #{i}: 你怎么看?"})
+            items.append(
+                {
+                    "role": "assistant",
+                    "content": f"关于{topic},这是第{i}条填充回复,仅用于撑大对话上下文,内容本身无实际意义。",
+                }
+            )
+    return items
+
+
+def build_seed_items(seed_history: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build session items for a task's `seed_history` field (Form A: `turns`,
+    Form B: `generate`)."""
+    if "turns" in seed_history:
+        return _seed_items_from_turns(seed_history["turns"])
+    if "generate" in seed_history:
+        return _seed_items_from_generate(seed_history["generate"])
+    return []
+
+
+def build_runtime(tmp_dir: Path, model_override: str | None, think_override: bool | None = None) -> AgentRuntime:
     base = get_settings()
     updates: Dict[str, Any] = {
         "sessions_db_path": tmp_dir / "sessions.db",
@@ -84,6 +119,8 @@ def build_runtime(tmp_dir: Path, model_override: str | None) -> AgentRuntime:
     }
     if model_override:
         updates["openai_model"] = model_override
+    if think_override is not None:
+        updates["openai_think_enabled"] = think_override
     settings = base.model_copy(update=updates)
     return AgentRuntime(settings)
 
@@ -93,9 +130,10 @@ async def run_benchmark(
     repeats: int,
     model_override: str | None,
     out_path: Path,
+    think_override: bool | None = None,
 ) -> None:
     tmp_dir = Path(tempfile.mkdtemp(prefix="agent-bench-"))
-    runtime = build_runtime(tmp_dir, model_override)
+    runtime = build_runtime(tmp_dir, model_override, think_override)
     real_tools = list(runtime._agent.tools)  # noqa: SLF001 (see README note)
 
     recorder = CallRecorder()
@@ -111,6 +149,12 @@ async def run_benchmark(
             chat_counter += 1
             chat_id = BASE_CHAT_ID + chat_counter
             recorder.reset()
+            seed_history = task.get("seed_history")
+            if seed_history:
+                seed_items = build_seed_items(seed_history)
+                if seed_items:
+                    session = runtime._get_session(chat_id)  # noqa: SLF001 (see README note)
+                    await session.add_items(seed_items)
             started = time.monotonic()
             error: str | None = None
             response = ""
@@ -141,14 +185,17 @@ async def run_benchmark(
                   f"({elapsed}s, tools={score['detail']['called']})")
 
     resolved_model = runtime._settings.openai_model  # noqa: SLF001 (see README note)
+    resolved_think = runtime._settings.openai_think_enabled  # noqa: SLF001 (see README note)
     await runtime.aclose()
     report = summarize(records)
+    report["model"] = resolved_model
+    report["think_enabled"] = resolved_think
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps({"summary": report, "runs": records}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    print_report(report, resolved_model)
+    print_report(report)
     print(f"\nFull results written to {out_path}")
 
 
@@ -162,6 +209,10 @@ def summarize(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     def rate(items: List[Dict[str, Any]], key: str) -> float:
         return round(sum(1 for i in items if i[key]) / len(items), 3) if items else 0.0
 
+    mean_elapsed = (
+        round(sum(r["elapsed_seconds"] for r in records) / len(records), 2) if records else 0.0
+    )
+
     return {
         "total_runs": len(records),
         "overall": {
@@ -171,6 +222,7 @@ def summarize(records: List[Dict[str, Any]]) -> Dict[str, Any]:
             "no_extra_call_rate": rate(records, "no_extra_calls"),
             "response_rate": rate(records, "responded"),
             "content_rate": rate(records, "content_ok"),
+            "mean_elapsed_seconds": mean_elapsed,
         },
         "by_category": {
             cat: {"runs": len(items), "pass_rate": rate(items, "passed"),
@@ -190,12 +242,14 @@ def summarize(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def print_report(report: Dict[str, Any], resolved_model: str) -> None:
+def print_report(report: Dict[str, Any]) -> None:
+    think_label = "on" if report.get("think_enabled") else "off"
     print("\n" + "=" * 60)
-    print(f"AGENT BENCHMARK REPORT  (model: {resolved_model})")
+    print(f"AGENT BENCHMARK REPORT  (model: {report.get('model', 'unknown')}, think: {think_label})")
     print("=" * 60)
     o = report["overall"]
-    print(f"Runs: {report['total_runs']}   Pass rate: {o['pass_rate']:.0%}")
+    print(f"Runs: {report['total_runs']}   Pass rate: {o['pass_rate']:.0%}   "
+          f"mean elapsed: {o['mean_elapsed_seconds']}s")
     print(f"  tool selection: {o['tool_selection_acc']:.0%}   params: {o['param_acc']:.0%}   "
           f"no-extra-calls: {o['no_extra_call_rate']:.0%}   responded: {o['response_rate']:.0%}   "
           f"content: {o['content_rate']:.0%}")
@@ -217,6 +271,8 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--model", default=None,
                         help="Override OPENAI_MODEL, e.g. a strong cloud model for A/B comparison")
+    parser.add_argument("--think", choices=["on", "off"], default=None,
+                        help="Override OPENAI_THINK_ENABLED (gpt-oss reasoning) for this run, e.g. --think on")
     parser.add_argument("--filter", default=None,
                         help="Only run tasks whose category or id contains this substring")
     parser.add_argument("--out", default=None, help="Output JSON path")
@@ -231,11 +287,13 @@ def main() -> None:
         sys.exit(1)
     tasks = render_task_templates(tasks, get_settings().agent_timezone)
 
+    think_override = None if args.think is None else (args.think == "on")
     out = Path(args.out) if args.out else Path(
         f"bench/results/run-{time.strftime('%Y%m%d-%H%M%S')}"
-        f"{'-' + args.model.replace('/', '_').replace(':', '_') if args.model else ''}.json"
+        f"{'-' + args.model.replace('/', '_').replace(':', '_') if args.model else ''}"
+        f"{'-think_' + args.think if args.think else ''}.json"
     )
-    asyncio.run(run_benchmark(tasks, args.repeats, args.model, out))
+    asyncio.run(run_benchmark(tasks, args.repeats, args.model, out, think_override))
 
 
 if __name__ == "__main__":

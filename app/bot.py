@@ -117,7 +117,13 @@ def _normalize_markdown_for_telegram(text: str) -> str:
 
 
 def _prepare_agent_message(text: str, citations: Sequence[str] | None = None) -> str:
-    """Append missing citations and normalize formatting for Telegram Markdown."""
+    """Append any source URLs the model didn't already mention, and normalize
+    formatting for Telegram Markdown.
+
+    Citations are appended as plain URLs (no `[n](url)` markdown link syntax):
+    a small model can't reliably produce well-formed inline links, and a
+    malformed one triggers a Telegram BadRequest on send.
+    """
     message = text.strip()
     unique_urls: list[str] = []
     if citations:
@@ -126,15 +132,10 @@ def _prepare_agent_message(text: str, citations: Sequence[str] | None = None) ->
             if not clean or clean in unique_urls:
                 continue
             unique_urls.append(clean)
-    if unique_urls:
-        missing: list[tuple[int, str]] = []
-        for idx, url in enumerate(unique_urls, start=1):
-            marker = f"[{idx}]("
-            if marker not in message:
-                missing.append((idx, url))
-        if missing:
-            footer_line = ", ".join(f"[{idx}]({_escape_markdown_url(url)})" for idx, url in missing)
-            message = f"{message.rstrip()}\n\nSources / 来源: {footer_line}"
+    missing = [url for url in unique_urls if url not in message]
+    if missing:
+        footer = "\n".join(missing)
+        message = f"{message.rstrip()}\n\nSources / 来源:\n{footer}"
     return _normalize_markdown_for_telegram(message)
 
 

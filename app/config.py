@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     openai_temperature: float = Field(0.2, alias="OPENAI_TEMPERATURE")
     openai_tracing_enabled: bool = Field(False, alias="OPENAI_TRACING_ENABLED")
     agent_timezone: str = Field("America/Los_Angeles", alias="AGENT_TIMEZONE")
+    openai_think_enabled: bool = Field(False, alias="OPENAI_THINK_ENABLED")
     web_search_enabled: bool = Field(False, alias="WEB_SEARCH_ENABLED")
     web_search_base_url: str = Field("https://ollama.com", alias="WEB_SEARCH_BASE_URL")
     web_search_endpoint: str = Field("/api/web_search", alias="WEB_SEARCH_ENDPOINT")

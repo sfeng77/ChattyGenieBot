@@ -25,7 +25,7 @@ from app.features.reminder import current_chat_id
 from app.features.vision import create_disabled_vision_tool, create_vision_tool
 from app.features.web_search import WebSearchClient, create_disabled_web_search_tool, create_ollama_web_search_tool
 from app.progress import NullProgressDispatcher, ProgressDispatcher, ProgressHooks
-from app.prompt import current_datetime_line, get_agent_instructions
+from app.prompt import CURRENT_TIME_PLACEHOLDER, current_datetime_line, get_agent_instructions
 from app.storage.chat_store import ChatStore
 
 LOGGER = logging.getLogger(__name__)
@@ -106,13 +106,17 @@ class AgentRuntime:
         static_instructions = get_agent_instructions(web_search_available, finance_available, vision_available)
 
         def _dynamic_instructions(ctx, agent) -> str:  # noqa: ANN001, ARG001
-            return f"{current_datetime_line(self._settings.agent_timezone)}\n\n{static_instructions}"
+            time_section = f"# Current time\n- {current_datetime_line(self._settings.agent_timezone)}"
+            return static_instructions.replace(CURRENT_TIME_PLACEHOLDER, time_section)
 
         self._agent = Agent(
             name="Agent Mushroom",
             instructions=_dynamic_instructions,
             model=settings.openai_model,
-            model_settings=ModelSettings(temperature=settings.openai_temperature, extra_body={"think": False}),
+            model_settings=ModelSettings(
+                temperature=settings.openai_temperature,
+                extra_body={"think": settings.openai_think_enabled},
+            ),
             tools=tools,
         )
         self._sessions: Dict[int, SQLiteSession] = {}

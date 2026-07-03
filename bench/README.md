@@ -15,6 +15,10 @@ python -m bench.runner --tasks bench/tasks.json --repeats 5 --model <strong-mode
 
 # 只跑某一类
 python -m bench.runner --filter negative
+
+# gpt-oss 的 reasoning(think)开关 A/B,不改 .env
+python -m bench.runner --repeats 5 --think on
+python -m bench.runner --repeats 5 --think off
 ```
 
 ## 工作原理
@@ -45,7 +49,8 @@ python -m bench.runner --filter negative
   "expected_params": {"stock_trend": {"symbol": "NVDA", "days": [14, "14"]}},
   "mock_responses": {"stock_trend": {"error": "..."} },
   "response_must_contain": ["some substring", ["alt A", "alt B"]],
-  "response_must_not_contain": ["stale phrase"]
+  "response_must_not_contain": ["stale phrase"],
+  "seed_history": {"generate": {"topics": ["旅行"], "pairs_per_topic": 10}}
 }
 ```
 `mock_responses` 里给 `error` 注入失败,给 `response` 覆盖默认返回。
@@ -81,6 +86,32 @@ python -m bench.runner --filter negative
 预期结果(不在代码里做硬断言,靠人读报告判断):在加上"注入当前时间"这个
 修复之前,这三个任务应该失败;修复之后,足够强的模型应该能通过。本地小模型
 的结果可能会有波动——这种波动本身就是这个 benchmark 想暴露的问题。
+
+### --think 开关
+`OPENAI_THINK_ENABLED`(默认 `False`,对应之前硬编码的 `extra_body={"think": False}`)
+控制 gpt-oss 的 reasoning。`--think on` / `--think off` 临时覆盖当前运行的这个设置,
+不动 `.env`,机制和 `--model` 一样(`Settings.model_copy(update=...)`)。报告表头和
+结果 JSON 的 `summary.think_enabled` / `summary.model` 都会显示这次跑的实际取值,
+`summary.overall.mean_elapsed_seconds` 报告平均单次耗时(think=on 预期会更慢,用这个
+数字量化)。
+
+### seed_history / long_context 分类
+用于衡量"上下文很长时,agent 还能不能正确选工具、不跑题"——在跑任务输入
+之前,先往这个 chat 的 session 里塞一堆无关的历史消息。两种写法:
+- Form A(手写对话):`{"turns": [["用户说的话", "助手回的话"], ...]}`,
+  按顺序原样注入为交替的 user/assistant items。
+- Form B(本地生成,不调用模型):
+  `{"generate": {"topics": ["电子游戏", "旅行", "摄影"], "pairs_per_topic": 14}}`,
+  为每个 topic 用固定模板生成 `pairs_per_topic` 轮问答填充,达到目标轮数
+  (3 个 topic × 14 轮 ≈ 40 轮真实用户不会关心的历史)。
+
+`long_context` 分类里的任务是 `tool_selection` / `negative` / `param_accuracy`
+里 4 个已有任务的"加长版"(id 加 `_seeded` 后缀,期望值完全不变),只是多了
+`seed_history`。种子消息在分配好 chat_id、跑真正的任务输入之前,通过
+`runtime._get_session(chat_id)`(私有访问,和 `runtime._agent.tools` 同样的
+约定)直接 `add_items` 进去——harness 本来就禁用了 pruning,所以这里测的是
+"上下文本身很长"这件事,不是测 pruning 触发后的行为。把 `long_context` 的
+结果和它们的未加长版对照,就能量化"上下文变长导致的选工具/参数准确率下降"。
 
 ## 已知取舍
 - runner 直接访问 `runtime._agent.tools`(私有属性)。想干净一点,给

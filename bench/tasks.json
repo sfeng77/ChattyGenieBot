@@ -162,5 +162,42 @@
     "expected_tools": [],
     "response_must_contain": [["{{NEXT_WEDNESDAY_CN}}", "{{NEXT_WEDNESDAY}}"]],
     "note": "requires computing next Wednesday's date relative to the injected current date"
+  },
+  {
+    "id": "select_01_stock_basic_seeded",
+    "category": "long_context",
+    "input": "帮我看看NVDA这个月的走势",
+    "expected_tools": ["stock_trend"],
+    "forbidden_tools": ["web_search"],
+    "expected_params": {"stock_trend": {"symbol": "NVDA"}},
+    "seed_history": {"generate": {"topics": ["电子游戏", "旅行", "摄影"], "pairs_per_topic": 14}},
+    "note": "same expectations as select_01_stock_basic but with ~40 turns of unrelated filler history first"
+  },
+  {
+    "id": "select_04_reminder_seeded",
+    "category": "long_context",
+    "input": "明天早上9点提醒我给车做保养",
+    "expected_tools": ["set_reminder"],
+    "forbidden_tools": ["web_search", "stock_trend"],
+    "seed_history": {"generate": {"topics": ["电子游戏", "旅行", "摄影"], "pairs_per_topic": 14}},
+    "note": "same expectations as select_04_reminder but with ~40 turns of unrelated filler history first"
+  },
+  {
+    "id": "negative_01_smalltalk_seeded",
+    "category": "long_context",
+    "input": "哈哈今天心情不错,你呢?",
+    "expected_tools": [],
+    "forbidden_tools": ["web_search", "stock_trend", "set_reminder", "vision_analyze"],
+    "seed_history": {"generate": {"topics": ["电子游戏", "旅行", "摄影"], "pairs_per_topic": 14}},
+    "note": "same expectations as negative_01_smalltalk but with ~40 turns of unrelated filler history first"
+  },
+  {
+    "id": "param_01_ticker_extraction_seeded",
+    "category": "long_context",
+    "input": "微软过去两周的股价趋势如何?",
+    "expected_tools": ["stock_trend"],
+    "expected_params": {"stock_trend": {"symbol": "MSFT", "days": [14, "14"]}},
+    "seed_history": {"generate": {"topics": ["电子游戏", "旅行", "摄影"], "pairs_per_topic": 14}},
+    "note": "same expectations as param_01_ticker_extraction but with ~40 turns of unrelated filler history first"
   }
 ]
